@@ -1,0 +1,6 @@
+{
+  "name": "YTÜ İİBF ÇAN",
+  "description": "Yıldız Teknik Üniversitesi İİBF Çan Eğrisi ve Not Dağılım Paylaşım Portalı",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
