@@ -1,0 +1,33 @@
+187:  const [adminDirectForm, setAdminDirectForm] = useState({
+424:    if (!adminDirectForm.mappings || adminDirectForm.mappings.length === 0) {
+429:    const gd = adminDirectForm.gradesDistribution as any;
+430:    if (adminDirectForm.attendanceStatus === 'none' || adminDirectForm.attendanceStatus === 'not_failing') gd.F0 = 0;
+436:    const firstMapping = adminDirectForm.mappings[0];
+440:      code: adminDirectForm.courseCode || 'BİLİNMİYOR',
+441:      title: adminDirectForm.courseTitle,
+444:      mappings: adminDirectForm.mappings,
+446:      averageBell: adminDirectForm.averageBell || 50,
+447:      stdDev: adminDirectForm.stdDev,
+448:      bellType: adminDirectForm.bellType as any,
+449:      gradeThresholds: adminDirectForm.gradeThresholds as any,
+451:      professorName: adminDirectForm.professorName,
+452:      profMainDept: adminDirectForm.profMainDept,
+453:      term: adminDirectForm.term,
+454:      attendanceStatus: adminDirectForm.attendanceStatus,
+455:      description: adminDirectForm.description,
+2383:                        <input type="text" className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" value={adminDirectForm.courseTitle} onChange={(e) => setAdminDirectForm(prev => ({...prev, courseTitle: e.target.value}))} />
+2387:                        <input type="text" className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" value={adminDirectForm.professorName} onChange={(e) => setAdminDirectForm(prev => ({...prev, professorName: e.target.value}))} />
+2391:                        <input type="text" className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" value={adminDirectForm.courseCode} onChange={(e) => setAdminDirectForm(prev => ({...prev, courseCode: e.target.value}))} />
+2397:                          value={adminDirectForm.term} 
+2410:                        <input type="number" step="0.01" className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" value={adminDirectForm.averageBell} onChange={(e) => setAdminDirectForm(prev => ({...prev, averageBell: parseFloat(e.target.value) || 0}))} />
+2414:                        <input type="number" step="0.01" className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" value={adminDirectForm.stdDev} onChange={(e) => setAdminDirectForm(prev => ({...prev, stdDev: parseFloat(e.target.value) || 0}))} />
+2418:                        <select className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none cursor-pointer" value={adminDirectForm.profMainDept} onChange={(e) => setAdminDirectForm(prev => ({...prev, profMainDept: e.target.value}))}>
+2428:                        <select className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none cursor-pointer" value={adminDirectForm.bellType} onChange={(e) => setAdminDirectForm(prev => ({...prev, bellType: e.target.value as any}))}>
+2439:                          value={adminDirectForm.attendanceStatus} 
+2457:                            const isSelected = adminDirectForm.mappings?.some(m => m.dept === dept.key) ?? false;
+2458:                            const currentYear = adminDirectForm.mappings?.find(m => m.dept === dept.key)?.year ?? (dept.hasYear ? 1 : 'none');
+2472:                                    updated = (adminDirectForm.mappings || []).filter(m => m.dept !== dept.key);
+2474:                                    updated = [...(adminDirectForm.mappings || []), { dept: dept.key, year: dept.hasYear ? 1 : 'none' }];
+2496:                                        const updated = (adminDirectForm.mappings || []).map(m => 
+2528:                                  value={adminDirectForm.gradeThresholds?.[grade as keyof typeof adminDirectForm.gradeThresholds] ?? ''}
+2537:                                value={(grade === 'F0' && (adminDirectForm.attendanceStatus === 'none' || adminDirectForm.attendanceStatus === 'not_failing')) ? 0 : (adminDirectForm.gradesDistribution?.[grade as keyof typeof adminDirectForm.gradesDistribution] ?? 0)} disabled={grade === 'F0' && (adminDirectForm.attendanceStatus === 'none' || adminDirectForm.attendanceStatus === 'not_failing')}

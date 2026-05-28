@@ -1,6 +1,6 @@
 {
-  "name": "YTÜ İİBF ÇAN",
-  "description": "Yıldız Teknik Üniversitesi İİBF Çan Eğrisi ve Not Dağılım Paylaşım Portalı",
+  "name": "Yıldız Çan",
+  "description": "Kredisi aynı, eziyeti farklı. Yıldız Çan ile asimetrik bilgiyi ortadan kaldır!",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

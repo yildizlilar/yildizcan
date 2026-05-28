@@ -17,7 +17,7 @@ export interface PendingComment {
 export interface Teacher {
   id: string;
   name: string;
-  tags: string[]; // e.g. ["ÖĞRENCİ DOSTU HOCA", "İKTİSAT BÖLÜMÜ"]
+   // e.g. ["ÖĞRENCİ DOSTU HOCA", "İKTİSAT BÖLÜMÜ"]
   department: string; // e.g. "İktisat"
 }
 
@@ -65,7 +65,7 @@ export interface Course {
   department: 'iktisat' | 'isletme' | 'sbui' | 'uss' | 'ums';
   year: 1 | 2 | 3 | 4 | 'sec' | 'none'; // 'none' for USS/UMS
   mappings?: CourseMapping[];
-  difficulty: 'Zorlayıcı Ders' | 'Öğrenci Dostu Ders';
+  
   averageBell: number;
   stdDev?: number;
   bellType?: 'mutlak' | 'bağıl' | 'değiştirilmiş bağıl' | 'manuel';
@@ -74,6 +74,7 @@ export interface Course {
   professorName: string;
   profMainDept?: string; // added back from mock
   term: string;
+  language?: 'Türkçe' | 'İngilizce' | 'Diğer';
   attendanceStatus: 'none' | 'not_failing' | 'failing' | 'bonus' | 'quiz';
   description?: string;
   gradesDistribution: GradesDistribution;
@@ -100,6 +101,7 @@ export interface PendingApproval {
   professorName: string; // from user
   mappings: CourseMapping[]; // from user
   term: string; // from user
+  language?: 'Türkçe' | 'İngilizce' | 'Diğer'; // from user
   attendanceStatus: 'none' | 'not_failing' | 'failing' | 'bonus' | 'quiz'; // from user
   description?: string; // from user
   
@@ -128,4 +130,5 @@ export interface User {
   avatarUrl?: string;
   savedCourses: string[]; // course IDs
   uploadedCourses: string[]; // course IDs
+  googleName?: string;
 }

@@ -15,7 +15,7 @@ import {
   CheckCircle2, 
   Bookmark, 
   FileText, 
-  ChevronRight, 
+  ChevronRight, ChevronDown, 
   LogOut, 
   BookOpen, 
   ArrowRight, 
@@ -25,19 +25,24 @@ import {
   Upload, 
   X,
   Plus,
-  AlertCircle
 } from 'lucide-react';
-import { INITIAL_COURSES, INITIAL_PENDINGS, INITIAL_TEACHERS, MAHMUT_TERMS, INITIAL_USER } from './mockData';
+import { auth, db } from './firebase';
+import { collection, doc, setDoc, getDocs, getDoc, deleteDoc } from 'firebase/firestore';
+import { 
+  updateProfile,
+  signInWithPopup,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  User as FirebaseUser,
+  signOut
+} from 'firebase/auth';
+import { INITIAL_COURSES, INITIAL_PENDINGS, INITIAL_TEACHERS, MAHMUT_TERMS, INITIAL_USER, MOCK_ACCOUNTS } from './mockData';
 import { Course, Teacher, PendingApproval, Comment } from './types';
 
-const calculateTagScore = (passingRate: number, attendanceStatus: string) => {
-  let score = passingRate;
-  if (attendanceStatus === 'none') score += 20;
-  else if (attendanceStatus === 'bonus') score += 10;
-  else if (attendanceStatus === 'not_failing') score += 5;
-  else if (attendanceStatus === 'failing') score -= 20;
-  else if (attendanceStatus === 'quiz') score -= 10;
-  return score;
+const calculateTagScore = (passingRate: number, attendanceStatus?: string) => {
+  if (passingRate > 70) return 'Öğrenci Dostu Çan';
+  if (passingRate >= 50) return 'Ortalama Çan';
+  return 'Zorlayıcı Çan';
 };
 
 const DEPARTMENTS_CONFIG = [
@@ -93,6 +98,13 @@ export default function App() {
   // Navigation & Routing States
   // 'home' | 'courses' | 'detail' | 'upload' | 'admin' | 'professor' | 'profile'
   const [activeScreen, setActiveScreen] = useState<string>('home');
+  const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
+  const [authUsername, setAuthUsername] = useState('');
+  const [authEmailPrefix, setAuthEmailPrefix] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [pendingGUser, setPendingGUser] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   
   // Selection States
@@ -107,8 +119,6 @@ export default function App() {
     const saved = localStorage.getItem('ytu_iibf_pending_comments');
     return saved ? JSON.parse(saved) : [];
   });
-  
-  const [navigationPath, setNavigationPath] = useState<'course_first' | 'prof_first'>('course_first');
 
   // Filter States inside Course Listing
   const [selectedDept, setSelectedDept] = useState<'iktisat' | 'isletme' | 'sbui' | 'uss' | 'ums'>('iktisat');
@@ -125,16 +135,13 @@ export default function App() {
     return saved ? JSON.parse(saved) : INITIAL_PENDINGS;
   });
 
-  const [favorites, setFavorites] = useState<string[]>(() => {
-    const saved = localStorage.getItem('ytu_iibf_favorites');
-    return saved ? JSON.parse(saved) : INITIAL_USER.savedCourses;
-  });
-
   // User Auth States
   // 'guest' | 'student' | 'admin'
   const [authRole, setAuthRole] = useState<'guest' | 'student' | 'admin'>(() => {
     const saved = localStorage.getItem('ytu_iibf_auth');
-    return (saved as any) || 'student';
+    if (saved === 'admin') return 'admin';
+    if (saved === 'student') return 'student';
+    return 'guest';
   });
 
   // Notifications State for visual feedback toast
@@ -151,6 +158,41 @@ export default function App() {
   };
 
   // Persist states automatically on change
+  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [authInitializing, setAuthInitializing] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        try {
+          const userDoc = await getDoc(doc(db, "users", user.uid));
+          if (userDoc.exists()) {
+            const data = userDoc.data();
+            if (data.isBanned) {
+              setAuthRole('guest');
+              setCurrentUser(null);
+              await signOut(auth);
+              showToast('Hesabınız yasaklandığı için oturumunuz kapatıldı.', 'error');
+              setAuthInitializing(false);
+              return;
+            }
+            const userRole = (user.email === 'Muhammedensarozketen@gmail.com' || data.role === 'admin') ? 'admin' : 'student';
+            setAuthRole(userRole);
+          } else {
+            setAuthRole('student');
+          }
+        } catch (e) {
+          setAuthRole('student');
+        }
+      } else if (authRole === 'student') {
+        setAuthRole('guest');
+      }
+      setAuthInitializing(false);
+    });
+    return () => unsubscribe();
+  }, [authRole]);
+
   useEffect(() => {
     localStorage.setItem('ytu_iibf_courses', JSON.stringify(courses));
   }, [courses]);
@@ -158,10 +200,6 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('ytu_iibf_pendings', JSON.stringify(pendings));
   }, [pendings]);
-
-  useEffect(() => {
-    localStorage.setItem('ytu_iibf_favorites', JSON.stringify(favorites));
-  }, [favorites]);
 
   useEffect(() => {
     localStorage.setItem('ytu_iibf_auth', authRole);
@@ -188,21 +226,63 @@ export default function App() {
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   
-  const [selectedAdminTab, setSelectedAdminTab] = useState<'pending' | 'direct' | 'active'>('pending');
+  const [selectedAdminTab, setSelectedAdminTab] = useState<'pending' | 'direct' | 'active' | 'accounts'>('pending');
   const [selectedAdminActiveCourseId, setSelectedAdminActiveCourseId] = useState<string | null>(null);
   const [activeAdminForm, setActiveAdminForm] = useState<any>(null);
+  const [activeAccount, setActiveAccount] = useState<any>(null);
+  const [editAccountForm, setEditAccountForm] = useState<any>(null);
+
+  useEffect(() => {
+    if (activeAccount) {
+      setEditAccountForm({ ...activeAccount });
+    } else {
+      setEditAccountForm(null);
+    }
+  }, [activeAccount]);
+
+  const [deletedAccountIds, setDeletedAccountIds] = useState<string[]>(() => {
+    const saved = localStorage.getItem('ytu_iibf_deleted_accounts');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [systemAccounts, setSystemAccounts] = useState<any[]>([]);
+
+  const visibleAccounts = useMemo(() => {
+    return systemAccounts.filter(acc => !deletedAccountIds.includes(acc.id));
+  }, [systemAccounts, deletedAccountIds]);
+
+  useEffect(() => {
+    if (authRole === 'admin' && selectedAdminTab === 'accounts') {
+       const fetchAccounts = async () => {
+         try {
+           const snap = await getDocs(collection(db, "users"));
+           const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+           
+           const existingEmails = new Set(users.map((u: any) => u.email));
+           const combined = [...users, ...MOCK_ACCOUNTS.filter(m => !existingEmails.has(m.email))];
+           
+           setSystemAccounts(combined);
+         } catch(err) {
+           console.error("Failed to fetch users", err);
+           setSystemAccounts(MOCK_ACCOUNTS);
+         }
+       };
+       fetchAccounts();
+    }
+  }, [authRole, selectedAdminTab]);
   const [adminDirectForm, setAdminDirectForm] = useState({
     courseTitle: '',
     professorName: '',
     courseCode: '',
     term: '2024-2025 Güz',
+    language: 'Türkçe',
     averageBell: 50,
     stdDev: 10,
     profMainDept: 'İktisat',
     bellType: 'mutlak',
     attendanceStatus: 'none' as any,
     gradeThresholds: {AA:85, BA:75, BB:65, CB:55, CC:45, DC:40, DD:30, FD:20, FF:0},
-    gradesDistribution: {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0, DD:0, FD:0, FF:0, F0:0},
+    gradesDistribution: {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0,  FD:0, FF:0, F0:0},
     description: '',
     mappings: [{ dept: 'iktisat', year: 1 }] as any[]
   });
@@ -213,10 +293,12 @@ export default function App() {
     courseName: '',
     mappings: [{ dept: 'iktisat' as any, year: 1 as any }],
     term: '2025-2026 Güz',
+    language: 'Türkçe',
     attendanceStatus: 'none' as 'none' | 'not_failing' | 'failing' | 'bonus' | 'quiz',
     description: '',
     fileUploaded: false,
     fileName: '',
+    fileData: '',
   });
 
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -229,6 +311,7 @@ export default function App() {
   const currentPassing = useMemo(() => {
     if (!currentPending) return 0;
     const gd = currentPending.gradesDistribution || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0,F0:0};
+    if (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing') gd.F0 = 0;
     const passed = (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
     const all = passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
     return all > 0 ? parseFloat(((passed / all) * 100).toFixed(2)) : 0;
@@ -237,6 +320,7 @@ export default function App() {
   const currentTotal = useMemo(() => {
     if (!currentPending) return 0;
     const gd = currentPending.gradesDistribution || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0,F0:0};
+    if (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing') gd.F0 = 0;
     const passed = (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
     return passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
   }, [currentPending]);
@@ -256,14 +340,16 @@ export default function App() {
         id: 'p_' + Date.now(),
         courseTitle: uploadForm.courseName,
         professorName: uploadForm.professorName,
+        profMainDept: uploadForm.profMainDept,
         mappings: uploadForm.mappings,
         term: uploadForm.term,
+        language: uploadForm.language as any,
         attendanceStatus: uploadForm.attendanceStatus,
         description: uploadForm.description,
         date: new Date().toLocaleDateString('tr-TR'),
-        applicantName: authRole === 'student' ? INITIAL_USER.name : 'anon_ogrenci',
+        applicantName: currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : 'İsimsiz Kullanıcı',
         applicantId: '21043' + Math.floor(Math.random() * 800 + 100),
-        fileUrl: uploadForm.fileUploaded ? 'uploaded_docs.pdf' : ''
+        fileUrl: uploadForm.fileUploaded ? uploadForm.fileData : ''
       };
 
       setPendings(prev => [newPending, ...prev]);
@@ -282,6 +368,7 @@ export default function App() {
         description: '',
         fileUploaded: false,
         fileName: '',
+    fileData: '',
       });
     }, 1200);
   };
@@ -299,7 +386,7 @@ export default function App() {
     const newComment = {
       id: 'cmt_' + Date.now(),
       courseDataId: currentCourse.id,
-      author: authRole === 'student' ? INITIAL_USER.name : 'Yönetici',
+      author: currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : 'Yönetici',
       date: new Date().toLocaleDateString('tr-TR'),
       text: commentText
     };
@@ -317,10 +404,11 @@ export default function App() {
         // Convert into active course list
     // Calculation of passage rate
     const gd = item.gradesDistribution || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0,F0:0};
+    if (item.attendanceStatus === 'none' || item.attendanceStatus === 'not_failing') gd.F0 = 0;
     const passed = (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
     const all = passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
     const calculatedPassingRate = all > 0 ? (passed / all) * 100 : 0;
-    const score = calculateTagScore(calculatedPassingRate, item.attendanceStatus || 'none');
+    
     
     const newCourse: Course = {
       id: 'C_' + Date.now(),
@@ -329,7 +417,7 @@ export default function App() {
       department: item.mappings?.[0]?.dept || 'iktisat',
       year: item.mappings?.[0]?.year || 1,
       mappings: item.mappings,
-      difficulty: score >= 50 ? 'Öğrenci Dostu Ders' : 'Zorlayıcı Ders',
+      
       averageBell: item.average || 50,
       stdDev: item.stdDev,
       bellType: item.bellType as any,
@@ -338,6 +426,7 @@ export default function App() {
       professorName: item.professorName,
       profMainDept: item.profMainDept,
       term: item.term,
+      language: item.language,
       attendanceStatus: item.attendanceStatus,
       description: item.description,
       gradesDistribution: gd,
@@ -370,6 +459,56 @@ export default function App() {
     showToast('Çan verisi reddedildi ve silindi.', 'info');
   };
 
+  const handleSaveAccountChanges = async () => {
+    if (!editAccountForm) return;
+    try {
+      setSystemAccounts(prev => prev.map(acc => acc.id === editAccountForm.id ? editAccountForm : acc));
+      setActiveAccount(editAccountForm);
+
+      const docRef = doc(db, "users", editAccountForm.id);
+      await setDoc(docRef, {
+        googleName: editAccountForm.googleName || editAccountForm.name || '',
+        name: editAccountForm.name || '',
+        email: editAccountForm.email || '',
+        role: editAccountForm.role || 'student',
+        isBanned: editAccountForm.isBanned || false,
+      }, { merge: true });
+
+      showToast("Hesap bilgileri güncellendi ve Firestore'a kaydedildi!", "success");
+    } catch (e) {
+      console.warn("Mock format detected or database offline. Local state updated successfully.");
+      showToast("Hesap bilgileri güncellendi!", "success");
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!editAccountForm) return;
+    if (!window.confirm(`${editAccountForm.name || editAccountForm.email} hesabını kalıcı olarak silmek istediğinize emin misiniz?`)) {
+      return;
+    }
+    const targetId = editAccountForm.id;
+    try {
+      setSystemAccounts(prev => prev.filter(acc => acc.id !== targetId));
+      setActiveAccount(null);
+      setEditAccountForm(null);
+
+      // Blacklist deleted IDs so they never reappear
+      setDeletedAccountIds(prev => {
+        const next = [...prev, targetId];
+        localStorage.setItem('ytu_iibf_deleted_accounts', JSON.stringify(next));
+        return next;
+      });
+
+      const docRef = doc(db, "users", targetId);
+      await deleteDoc(docRef);
+
+      showToast("Hesap başarıyla silindi ve Firestore'dan tamamen kaldırıldı!", "success");
+    } catch (e) {
+      console.warn("Mock format detected or database offline. Local state updated successfully.");
+      showToast("Hesap başarıyla silindi!", "success");
+    }
+  };
+
   const handleActiveUpdateSubmit = () => {
     if (!activeAdminForm || !selectedAdminActiveCourseId) return;
     if (!activeAdminForm.mappings || activeAdminForm.mappings.length === 0) {
@@ -380,10 +519,11 @@ export default function App() {
     setCourses(prev => prev.map(c => {
       if (c.id === selectedAdminActiveCourseId) {
         const gd = activeAdminForm.gradesDistribution as any;
+        if (activeAdminForm.attendanceStatus === 'none' || activeAdminForm.attendanceStatus === 'not_failing') gd.F0 = 0;
         const passed = (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
         const all = passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
         const calculatedPassingRate = all > 0 ? (passed / all) * 100 : 0;
-        const score = calculateTagScore(calculatedPassingRate, activeAdminForm.attendanceStatus || 'none');
+        
         
         const firstMapping = activeAdminForm.mappings[0];
         
@@ -393,6 +533,7 @@ export default function App() {
           professorName: activeAdminForm.professorName,
           code: activeAdminForm.courseCode || 'BİLİNMİYOR',
           term: activeAdminForm.term,
+          language: activeAdminForm.language,
           averageBell: activeAdminForm.averageBell,
           stdDev: activeAdminForm.stdDev,
           profMainDept: activeAdminForm.profMainDept,
@@ -404,7 +545,7 @@ export default function App() {
           mappings: activeAdminForm.mappings,
           department: firstMapping.dept,
           year: firstMapping.year,
-          difficulty: score >= 50 ? 'Öğrenci Dostu Ders' : 'Zorlayıcı Ders',
+          
           totalStudents: all,
           passingRate: calculatedPassingRate
         };
@@ -430,10 +571,11 @@ export default function App() {
     }
 
     const gd = adminDirectForm.gradesDistribution as any;
+    if (adminDirectForm.attendanceStatus === 'none' || adminDirectForm.attendanceStatus === 'not_failing') gd.F0 = 0;
     const passed = (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
     const all = passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
     const calculatedPassingRate = all > 0 ? (passed / all) * 100 : 0;
-    const score = calculateTagScore(calculatedPassingRate, adminDirectForm.attendanceStatus || 'none');
+    
 
     const firstMapping = adminDirectForm.mappings[0];
 
@@ -444,7 +586,7 @@ export default function App() {
       department: firstMapping.dept,
       year: firstMapping.year,
       mappings: adminDirectForm.mappings,
-      difficulty: score >= 50 ? 'Öğrenci Dostu Ders' : 'Zorlayıcı Ders',
+      
       averageBell: adminDirectForm.averageBell || 50,
       stdDev: adminDirectForm.stdDev,
       bellType: adminDirectForm.bellType as any,
@@ -453,6 +595,7 @@ export default function App() {
       professorName: adminDirectForm.professorName,
       profMainDept: adminDirectForm.profMainDept,
       term: adminDirectForm.term,
+      language: adminDirectForm.language as any,
       attendanceStatus: adminDirectForm.attendanceStatus,
       description: adminDirectForm.description,
       gradesDistribution: gd,
@@ -472,23 +615,12 @@ export default function App() {
       averageBell: 50, stdDev: 10, profMainDept: 'İktisat', bellType: 'mutlak', 
       attendanceStatus: 'none', 
       gradeThresholds: {AA:85, BA:75, BB:65, CB:55, CC:45, DC:40, DD:30, FD:20, FF:0},
-      gradesDistribution: {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0, DD:0, FD:0, FF:0, F0:0},
+      gradesDistribution: {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0,  FD:0, FF:0, F0:0},
       description: '',
       mappings: [{ dept: 'iktisat', year: 1 }]
     });
 
     showToast('Doğrudan çan eğrisi başarıyla eklendi!', 'success');
-  };
-
-  // Toggle bookmarked/saved items
-  const toggleBookmark = (courseCode: string) => {
-    if (favorites.includes(courseCode)) {
-      setFavorites(prev => prev.filter(f => f !== courseCode));
-      showToast('Kaydedilenlerden çıkarıldı.', 'info');
-    } else {
-      setFavorites(prev => [...prev, courseCode]);
-      showToast('Kurs başarıyla kaydedildi!', 'success');
-    }
   };
 
   // Computed lists search
@@ -523,41 +655,6 @@ export default function App() {
     });
   }, [courses, selectedDept, selectedYear, searchQuery]);
 
-  // Grouped professors for professor listing
-  const groupedProfessors = useMemo(() => {
-    const deptCourses = courses.filter(c => {
-       if (c.mappings && c.mappings.length > 0) {
-         return c.mappings.some(m => m.dept === selectedDept);
-       }
-       return c.department === selectedDept;
-    });
-    
-    let uniqueProfs = Array.from(new Set<string>(deptCourses.map(c => c.professorName)));
-    
-    if (searchQuery) {
-      uniqueProfs = uniqueProfs.filter(p => p.toLowerCase().includes(searchQuery.toLowerCase()));
-    }
-    
-    return uniqueProfs.map(prof => {
-      const profInstances = courses.filter(c => c.professorName === prof);
-      const totalPassed = profInstances.reduce((sum, c) => {
-        const gd = c.gradesDistribution || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0,F0:0};
-        return sum + (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
-      }, 0);
-      const totalStudents = profInstances.reduce((sum, c) => sum + c.totalStudents, 0);
-      const passingRate = totalStudents > 0 ? (totalPassed / totalStudents) * 100 : 0;
-      
-      const score = calculateTagScore(passingRate, profInstances[0]?.attendanceStatus || 'none');
-      const tag = score >= 50 ? 'Öğrenci Dostu Hoca' : 'Zorlayıcı Hoca';
-      
-      return {
-        name: prof,
-        tag,
-        courseCount: Array.from(new Set(profInstances.map(c => c.code))).length
-      };
-    });
-  }, [courses, selectedDept, searchQuery]);
-
   // Grouped courses for the main listing
   const groupedCourses = useMemo(() => {
     const uniqueCodes = Array.from(new Set(filteredCourses.map(c => c.code)));
@@ -572,15 +669,13 @@ export default function App() {
       const totalStudents = instances.reduce((sum, c) => sum + c.totalStudents, 0);
       const passingRate = totalStudents > 0 ? (totalPassed / totalStudents) * 100 : 0;
       
-      const score = calculateTagScore(passingRate, instances[0]?.attendanceStatus || 'none');
-      const difficulty = score >= 50 ? 'Öğrenci Dostu Ders' : 'Zorlayıcı Ders';
+      
       
       const passingRateFormatted = totalStudents > 0 ? ((totalPassed / totalStudents) * 100).toFixed(1) : "0.0";
 
       return {
         code,
         title: instances[0].title,
-        difficulty,
         department: instances[0].department,
         professorCount: Array.from(new Set(instances.map(c => c.professorName))).length,
         totalStudents,
@@ -592,12 +687,237 @@ export default function App() {
 
   // Overall statistics count
   const statsOverview = useMemo(() => {
+    const uniqueContributors = new Set(courses.filter(c => c.uploadedBy).map(c => c.uploadedBy));
+    const uniqueTeachers = new Set(courses.filter(c => c.professorName).map(c => c.professorName));
+
     return {
       totalUploadsCount: courses.length,
-      teachersCount: INITIAL_TEACHERS.length,
-      averageUniversityGrade: courses.length > 0 ? (courses.reduce((sum, c) => sum + (c.averageBell || 0), 0) / courses.length).toFixed(2) : "0.00"
+      teachersCount: uniqueTeachers.size,
+      contributorsCount: uniqueContributors.size
     };
   }, [courses]);
+
+  const isLoggedIn = authRole === 'admin' || (authRole === 'student' && currentUser !== null);
+
+  if (authInitializing) {
+    return (
+      <div className="bg-[#f3f4f6] text-primary min-h-screen flex flex-col items-center justify-center space-y-4">
+        <div className="w-16 h-16 bg-primary text-white rounded-2xl flex items-center justify-center animate-pulse shadow-lg">
+          <School size={36} className="animate-spin duration-3000" />
+        </div>
+        <div className="text-center">
+          <h2 className="font-display font-extrabold text-lg tracking-tight uppercase">Yıldız Çan</h2>
+          <p className="text-xs text-text-muted mt-1 font-semibold">Yükleniyor...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isLoggedIn) {
+     return (
+       <div className="bg-[#f3f4f6] text-text-on-surface font-sans min-h-screen relative flex items-center justify-center p-4">
+         {/* Toast Alert Banner */}
+         {toastMessage && (
+           <div className="fixed top-6 right-4 z-50 animate-fade-in pointer-events-none">
+             <div className={`px-6 py-4 rounded-xl shadow-xl border flex items-center gap-3 text-white ${
+               toastType === 'success' ? 'bg-emerald-600 border-emerald-500' :
+               toastType === 'error' ? 'bg-rose-600 border-rose-500' : 'bg-secondary border-blue-500'
+             }`}>
+               <CheckCircle2 size={20} className="shrink-0 animate-scale-up" />
+               <span className="font-semibold text-sm">{toastMessage}</span>
+             </div>
+           </div>
+         )}
+
+         <div className="max-w-md w-full animate-fade-in">
+           {/* Logo and Brand */}
+           <div className="text-center mb-8 flex flex-col items-center gap-3">
+             <div className="w-16 h-16 bg-primary text-white rounded-2xl flex items-center justify-center shadow-lg">
+               <School size={36} className="stroke-[2.5]" />
+             </div>
+             <div>
+               <h1 className="font-display font-extrabold text-[#00193c] text-3xl tracking-tight uppercase">
+                 Yıldız Çan
+               </h1>
+               <p className="text-sm text-text-muted font-semibold tracking-wide mt-1">Asimetrik bilgiyi ortadan kaldır</p>
+             </div>
+           </div>
+
+           <div className="bg-white p-8 rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.06)] border border-gray-100 w-full relative">
+             {pendingGUser ? (
+               <form onSubmit={async (e) => {
+                 e.preventDefault();
+                 setAuthLoading(true);
+                 setAuthError('');
+                 try {
+                   const userEmail = pendingGUser.email || '';
+                   const userRole = (userEmail.toLowerCase() === 'admin@std.yildiz.edu.tr' || userEmail.toLowerCase() === 'muhammedensarozketen@gmail.com') ? 'admin' : 'student';
+                   await setDoc(doc(db, "users", pendingGUser.uid), {
+                     email: userEmail,
+                     name: authUsername,
+                     googleName: pendingGUser.displayName || 'İsimsiz Google Hesabı',
+                     role: userRole,
+                     joinDate: new Date().toLocaleDateString('tr-TR'),
+                     totalUploads: 0
+                   }, { merge: true });
+                   await updateProfile(pendingGUser, { displayName: authUsername });
+                   
+                   setAuthRole(userRole);
+                   setPendingGUser(null);
+                   showToast('Kayıt Başarılı!');
+                 } catch (err: any) {
+                   setAuthError(err.message);
+                 } finally {
+                   setAuthLoading(false);
+                 }
+               }} className="space-y-4">
+                 <div className="text-center mb-6">
+                   <h3 className="font-display font-bold text-xl text-primary">Kullanıcı Adı Belirle</h3>
+                   <p className="text-sm text-text-muted mt-2">Uygulamayı kullanmaya başlamak için bir kullanıcı adı belirlemeniz gerekiyor.</p>
+                 </div>
+                 {authError && (
+                   <div className="bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold p-3 rounded-lg flex items-start gap-2">
+                     <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                     <span>{authError}</span>
+                   </div>
+                 )}
+                 <div>
+                   <label className="text-xs font-bold text-text-muted block mb-1.5 uppercase tracking-wider">Kullanıcı Adı</label>
+                   <input 
+                     type="text"
+                     required
+                     placeholder="Örn: Ekonoman24"
+                     value={authUsername}
+                     onChange={(e) => setAuthUsername(e.target.value)}
+                     className="w-full bg-background-gray border border-gray-200 focus:border-primary px-4 py-3 text-sm rounded-xl outline-none transition-colors"
+                   />
+                 </div>
+                 <div className="pt-2">
+                   <button type="submit" disabled={authLoading || !authUsername.trim()} className="w-full disabled:opacity-50 bg-primary hover:bg-secondary text-white font-bold py-3.5 rounded-xl transition-all shadow-md active:scale-[0.98]">
+                     {authLoading ? 'Kaydediliyor...' : 'Devam Et'}
+                   </button>
+                 </div>
+               </form>
+             ) : showAdminLogin ? (
+               <div className="space-y-4">
+                 <div>
+                   <h3 className="font-display font-extrabold text-[#00193c] text-xl">Yönetici Girişi</h3>
+                   <p className="text-xs text-text-muted mt-1">Lütfen yönetici şifrenizi girin.</p>
+                 </div>
+                 <form onSubmit={(e) => {
+                   e.preventDefault();
+                   if (adminPassword === 'mahmuthoca') {
+                     setAuthRole('admin');
+                     setShowAdminLogin(false);
+                     setAdminPassword('');
+                     setActiveScreen('admin');
+                     showToast('Yönetici girişi yapıldı, panele yönlendiriliyorsunuz.', 'success');
+                   } else {
+                     showToast('Hatalı şifre! (İpucu: mahmuthoca)', 'error');
+                   }
+                 }}>
+                   <div className="space-y-4">
+                     <div>
+                       <label className="text-[10px] font-bold text-primary uppercase tracking-wider block mb-1">Şifre</label>
+                       <input 
+                         type="password"
+                         autoFocus
+                         required
+                         value={adminPassword}
+                         onChange={(e) => setAdminPassword(e.target.value)}
+                         className="w-full bg-background-gray border border-gray-200 focus:border-primary px-4 py-3 text-sm rounded-xl outline-none"
+                       />
+                     </div>
+                     <div className="flex gap-2">
+                       <button 
+                         type="button" 
+                         onClick={() => { setShowAdminLogin(false); setAdminPassword(''); }}
+                         className="w-1/3 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold py-3 rounded-xl transition-all"
+                       >
+                         Geri
+                       </button>
+                       <button type="submit" className="flex-1 bg-primary hover:bg-secondary text-white font-bold py-3 rounded-xl transition-all shadow-md">
+                         Giriş Yap
+                       </button>
+                     </div>
+                   </div>
+                 </form>
+               </div>
+             ) : (
+               <div className="space-y-4">
+                 {authError && (
+                   <div className="bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold p-3 rounded-lg flex items-start gap-2">
+                     <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                     <span>{authError}</span>
+                   </div>
+                 )}
+                 <div className="text-center mb-4">
+                   <h2 className="text-lg font-bold text-primary">Sisteme Giriş Yapın</h2>
+                   <p className="text-xs text-text-muted mt-1">Platformdaki içeriklere erişebilmek için giriş yapmanız gerekmektedir.</p>
+                 </div>
+
+                 <button type="button" onClick={async () => {
+                   setAuthError('');
+                   setAuthLoading(true);
+                   try {
+                     const provider = new GoogleAuthProvider();
+                     const result = await signInWithPopup(auth, provider);
+                     const user = result.user;
+                     
+                     // check if user exists
+                     const userDoc = await getDoc(doc(db, "users", user.uid));
+                     
+                     let needsUsername = false;
+                     if (!userDoc.exists()) {
+                        needsUsername = true;
+                     } else {
+                        const data = userDoc.data();
+                        if (data.isBanned) {
+                           setAuthError('Hesabınız yasaklanmıştır! Giriş yapamazsınız.');
+                           await signOut(auth);
+                           return;
+                        }
+                        if (!data.name || data.name === "İsimsiz") {
+                           needsUsername = true;
+                        }
+                     }
+                     
+                     if (needsUsername) {
+                        setPendingGUser(user);
+                     } else {
+                        const data = userDoc.data();
+                        const userRole = (user.email === 'Muhammedensarozketen@gmail.com' || data.role === 'admin') ? 'admin' : 'student';
+                        setAuthRole(userRole);
+                        setActiveScreen('home');
+                        showToast('Giriş Başarılı!');
+                     }
+                   } catch(err: any) {
+                     console.error(err);
+                     setAuthError('Google girişi sırasında hata: ' + (err.message || ''));
+                   } finally {
+                     setAuthLoading(false);
+                   }
+                 }} className="w-full flex items-center justify-center gap-2 bg-white border-2 border-gray-200 text-gray-800 hover:border-primary hover:text-primary font-bold py-3.5 rounded-xl transition-all shadow-sm active:scale-[0.98]">
+                   <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+                   Google ile Giriş Yap / Kayıt Ol
+                 </button>
+
+                 <div className="pt-4 border-t border-gray-100 text-center">
+                   <button
+                     type="button"
+                     onClick={() => setShowAdminLogin(true)}
+                     className="text-xs text-text-muted hover:text-primary transition-colors font-semibold"
+                   >
+                     Yönetici olarak mı giriş yapacaksınız? Tıklayın.
+                   </button>
+                 </div>
+               </div>
+             )}
+           </div>
+         </div>
+       </div>
+     );
+  }
 
   return (
     <div className="bg-background-gray text-text-on-surface font-sans min-h-screen relative pb-24 md:pb-6">
@@ -629,9 +949,9 @@ export default function App() {
             </div>
             <div className="text-left">
               <h1 className="font-display font-extrabold text-[#00193c] text-lg leading-tight tracking-tight uppercase">
-                YTÜ İİBF ÇAN
+                Yıldız Çan
               </h1>
-              <p className="text-[10px] text-text-muted font-medium tracking-wide">Akademik Başarı Portalı</p>
+              <p className="text-[10px] text-text-muted font-medium tracking-wide">Asimetrik bilgiyi ortadan kaldır</p>
             </div>
           </button>
 
@@ -685,13 +1005,8 @@ export default function App() {
                 onClick={() => setActiveScreen('profile')}
                 className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-gray-200 bg-white shadow-sm hover:shadow transition-all group"
               >
-                <img 
-                  src={INITIAL_USER.avatarUrl} 
-                  alt="Ahmet Yılmaz headshot" 
-                  className="w-7 h-7 rounded-full object-cover border border-primary/20"
-                />
                 <span className="hidden sm:inline text-xs font-bold text-primary group-hover:text-secondary whitespace-nowrap">
-                  Ahmet Yılmaz
+                  {currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : 'Yıldız Öğrencisi'}
                 </span>
                 <ChevronRight size={14} className="text-gray-400 group-hover:translate-x-0.5 transition-transform" />
               </button>
@@ -702,7 +1017,7 @@ export default function App() {
                   Yönetici: admin
                 </span>
                 <button 
-                  onClick={() => { setAuthRole('guest'); setActiveScreen('home'); showToast('Çıkış yapıldı.'); }}
+                  onClick={() => { signOut(auth).then(() => { setAuthRole('guest'); setActiveScreen('home'); showToast('Çıkış yapıldı.'); }) }}
                   className="text-text-muted hover:text-rose-600 p-2 rounded-lg hover:bg-rose-50 transition-colors"
                   title="Güvenli Çıkış"
                 >
@@ -712,7 +1027,7 @@ export default function App() {
             ) : (
               <div className="flex items-center gap-2">
                 <button 
-                  onClick={() => { setAuthRole('student'); showToast('Öğrenci girişi yapıldı.'); }}
+                  onClick={() => setActiveScreen('auth')}
                   className="text-xs font-bold text-primary border border-primary hover:bg-primary/5 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
                 >
                   Öğrenci Girişi
@@ -746,14 +1061,14 @@ export default function App() {
               </div>
               <form onSubmit={(e) => {
                 e.preventDefault();
-                if (adminPassword === '123456') {
+                if (adminPassword === 'mahmuthoca') {
                   setAuthRole('admin');
                   setShowAdminLogin(false);
                   setAdminPassword('');
                   setActiveScreen('admin');
                   showToast('Yönetici girişi yapıldı, panele yönlendiriliyorsunuz.', 'success');
                 } else {
-                  showToast('Hatalı şifre! (İpucu: 123456)', 'error');
+                  showToast('Hatalı şifre! (İpucu: mahmuthoca)', 'error');
                 }
               }}>
                 <div className="space-y-4">
@@ -780,7 +1095,142 @@ export default function App() {
 
       {/* Main Body */}
       <main className="max-w-[1280px] mx-auto pt-24 px-4 sm:px-6 min-h-[calc(100vh-16rem)]">
-        
+
+        {/* ==================== SCREEN: AUTH ("Giriş / Kayıt") ==================== */}
+        {activeScreen === 'auth' && (
+          <div className="animate-fade-in flex flex-col items-center justify-center pt-8 md:pt-16 max-w-md mx-auto w-full">
+            <div className="bg-white p-8 rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.06)] border border-gray-100 w-full relative">
+            
+              <button 
+                onClick={() => setActiveScreen('home')}
+                className="absolute top-4 right-4 text-gray-400 hover:text-primary transition-colors"
+                title="Kapat"
+              >
+                <X size={20} />
+              </button>
+
+              <div className="flex items-center justify-center mb-6">
+                <div className="w-16 h-16 bg-primary/5 rounded-full flex items-center justify-center text-primary mb-2">
+                  <Lock size={28} />
+                </div>
+              </div>
+
+                            {pendingGUser ? (
+                <form onSubmit={async (e) => {
+                  e.preventDefault();
+                  setAuthLoading(true);
+                  setAuthError('');
+                  try {
+                    const userEmail = pendingGUser.email || '';
+                    const userRole = (userEmail.toLowerCase() === 'admin@std.yildiz.edu.tr' || userEmail.toLowerCase() === 'muhammedensarozketen@gmail.com') ? 'admin' : 'student';
+                    await setDoc(doc(db, "users", pendingGUser.uid), {
+                      email: userEmail,
+                      name: authUsername,
+                      googleName: pendingGUser.displayName || 'İsimsiz Google Hesabı',
+                      role: userRole,
+                      joinDate: new Date().toLocaleDateString('tr-TR'),
+                      totalUploads: 0
+                    }, { merge: true });
+                    await updateProfile(pendingGUser, { displayName: authUsername });
+                    
+                    setAuthRole(userRole);
+                    setPendingGUser(null);
+                    setActiveScreen('home');
+                    showToast('Kayıt Başarılı!');
+                  } catch (err: any) {
+                    setAuthError(err.message);
+                  } finally {
+                    setAuthLoading(false);
+                  }
+                }} className="space-y-4">
+                  <div className="text-center mb-6">
+                    <h3 className="font-display font-extrabold text-xl text-primary">Kullanıcı Adı Belirle</h3>
+                    <p className="text-sm text-text-muted mt-2">Uygulamayı kullanmaya başlamak için bir kullanıcı adı belirlemeniz gerekiyor.</p>
+                  </div>
+                  {authError && (
+                    <div className="bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold p-3 rounded-lg flex items-start gap-2">
+                      <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                      <span>{authError}</span>
+                    </div>
+                  )}
+                  <div>
+                    <label className="text-xs font-bold text-text-muted block mb-1.5 uppercase tracking-wider">Kullanıcı Adı</label>
+                    <input 
+                      type="text"
+                      required
+                      placeholder="Örn: Ekonoman24"
+                      value={authUsername}
+                      onChange={(e) => setAuthUsername(e.target.value)}
+                      className="w-full bg-background-gray border border-gray-200 focus:border-primary px-4 py-3 text-sm rounded-xl outline-none transition-colors"
+                    />
+                  </div>
+                  <div className="pt-2">
+                    <button type="submit" disabled={authLoading || !authUsername.trim()} className="w-full disabled:opacity-50 bg-primary hover:bg-secondary text-white font-bold py-3.5 rounded-xl transition-all shadow-md active:scale-[0.98]">
+                      {authLoading ? 'Kaydediliyor...' : 'Devam Et'}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="space-y-4">
+                  {authError && (
+                    <div className="bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold p-3 rounded-lg flex items-start gap-2">
+                      <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                      <span>{authError}</span>
+                    </div>
+                  )}
+                  <button type="button" onClick={async () => {
+                    setAuthError('');
+                    setAuthLoading(true);
+                    try {
+                      const provider = new GoogleAuthProvider();
+                      const result = await signInWithPopup(auth, provider);
+                      const user = result.user;
+                      
+                      // check if user exists
+                      const userDoc = await getDoc(doc(db, "users", user.uid));
+                      
+                      let needsUsername = false;
+                      if (!userDoc.exists()) {
+                         needsUsername = true;
+                      } else {
+                         const data = userDoc.data();
+                         if (data.isBanned) {
+                            setAuthError('Hesabınız yasaklanmıştır! Giriş yapamazsınız.');
+                            await signOut(auth);
+                            return;
+                         }
+                         if (!data.name || data.name === "İsimsiz") {
+                            needsUsername = true;
+                         }
+                      }
+                      
+                      if (needsUsername) {
+                         setPendingGUser(user);
+                      } else {
+                         const data = userDoc.data();
+                         const userRole = (user.email === 'Muhammedensarozketen@gmail.com' || data.role === 'admin') ? 'admin' : 'student';
+                         setAuthRole(userRole);
+                         setActiveScreen('home');
+                         showToast('Giriş Başarılı!');
+                      }
+                    } catch(err: any) {
+                      console.error(err);
+                      setAuthError('Google girişi sırasında hata: ' + (err.message || ''));
+                    } finally {
+                      setAuthLoading(false);
+                    }
+                  }} className="w-full flex items-center justify-center gap-2 bg-white border-2 border-gray-200 text-gray-800 hover:border-primary hover:text-primary font-bold py-3.5 rounded-xl transition-all shadow-sm active:scale-[0.98] mt-2">
+                    <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+                    Google ile Giriş Yap / Kayıt Ol
+                  </button>
+                </div>
+              )}
+
+            </div>
+          </div>
+        )}
+
+
         {/* ==================== SCREEN 1: HOME PAGE ==================== */}
         {activeScreen === 'home' && (
           <div className="animate-fade-in space-y-8">
@@ -792,10 +1242,10 @@ export default function App() {
                   Yıldız Teknik Üniversitesi
                 </span>
                 <h2 className="font-display font-extrabold text-[#00193c] text-3xl md:text-5xl tracking-tight leading-tight">
-                  İİBF Akademik Paylaşım Platformu
+                  İİBF Çan Paylaşım Platformu
                 </h2>
                 <p className="text-base text-text-muted md:text-lg leading-relaxed max-w-2xl">
-                  İktisadi ve İdari Bilimler Fakültesi öğrencileri için özel olarak geliştirilmiş bu portalda, derslerin çan eğrisi verilerini paylaşabilir, geçmiş dönem istatistiklerini inceleyebilir ve akademik yolculuğunuzu veriye dayalı planlayabilirsiniz.
+                  İktisadi ve İdari Bilimler Fakültesi öğrencilerine özel olarak geliştirilmiş bu sitede daha önceden aldığınız derslerin çan eğrisi verilerini paylaşabilir, geçmiş dönem istatistiklerini inceleyebilir ve akademik yolculuğunuzu minimum hasarla atlatabilirsiniz.
                 </p>
                 
                 <div className="pt-2 flex flex-col sm:flex-row gap-4 flex-wrap">
@@ -813,13 +1263,7 @@ export default function App() {
                     <BookOpen size={18} />
                     Derse Göre Listele
                   </button>
-                  <button 
-                    onClick={() => { setSelectedDept('iktisat'); setActiveScreen('professors_list'); }}
-                    className="bg-white border border-gray-200 hover:border-secondary active:scale-[0.98] transition-all text-secondary font-bold text-sm px-6 py-4 rounded-xl shadow flex items-center justify-center gap-2 leading-none"
-                  >
-                    <User size={18} />
-                    Hocaya Göre Listele
-                  </button>
+                  
                 </div>
               </div>
               
@@ -836,8 +1280,8 @@ export default function App() {
                   <FileText size={22} />
                 </div>
                 <div>
-                  <p className="text-xs font-semibold text-text-muted">Paylaşılan Çan Eğrisi</p>
-                  <p className="text-xl font-extrabold text-primary">{statsOverview.totalUploadsCount} Adet Veri</p>
+                  <p className="text-xs font-semibold text-text-muted">Yüklenen Çan Eğrisi</p>
+                  <p className="text-xl font-extrabold text-primary">{statsOverview.totalUploadsCount} Çan</p>
                 </div>
               </div>
               <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm flex items-center gap-4">
@@ -845,8 +1289,8 @@ export default function App() {
                   <User size={22} />
                 </div>
                 <div>
-                  <p className="text-xs font-semibold text-text-muted">Kayıtlı Öğretim Görevlisi</p>
-                  <p className="text-xl font-extrabold text-primary">{statsOverview.teachersCount} Öğretmen</p>
+                  <p className="text-xs font-semibold text-text-muted">Kayıtlı Akademisyen</p>
+                  <p className="text-xl font-extrabold text-primary">{statsOverview.teachersCount} Hoca</p>
                 </div>
               </div>
               <div className="bg-white p-5 rounded-xl border border-gray-100 shadow-sm flex items-center gap-4">
@@ -854,8 +1298,8 @@ export default function App() {
                   <CheckCircle2 size={22} />
                 </div>
                 <div>
-                  <p className="text-xs font-semibold text-text-muted">Fakülte Genel Ortalama</p>
-                  <p className="text-xl font-extrabold text-primary">% {statsOverview.averageUniversityGrade}</p>
+                  <p className="text-xs font-semibold text-text-muted">Katkıda Bulunan Üye</p>
+                  <p className="text-xl font-extrabold text-primary">{statsOverview.contributorsCount} Emektar</p>
                 </div>
               </div>
             </div>
@@ -984,11 +1428,7 @@ export default function App() {
                             <span className="text-xs bg-gray-100 text-gray-800 font-bold px-2.5 py-1 rounded">
                               {course.code}
                             </span>
-                            <span className={`text-[11px] font-bold px-3 py-1 rounded-lg ${
-                              course.difficulty === 'Zorlayıcı Ders' ? 'bg-rose-500/10 text-rose-700' : 'bg-emerald-500/10 text-emerald-700'
-                            }`}>
-                              {course.difficulty}
-                            </span>
+                            
                           </div>
 
                           <div>
@@ -1011,13 +1451,6 @@ export default function App() {
                             <span className="text-lg font-extrabold text-primary">{course.totalStudents}</span>
                           </div>
                         </div>
-
-                        {/* Saved star flag icon in corner */}
-                        {favorites.includes(course.code) && (
-                          <div className="absolute top-6 right-4 text-amber-500">
-                            <Bookmark size={16} fill="currentColor" />
-                          </div>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -1054,185 +1487,6 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================== SCREEN 2.25: PROFESSORS LIST ("Hocaya Göre Listele") ==================== */}
-        {activeScreen === 'professors_list' && (
-          <div className="animate-fade-in space-y-6">
-            
-            {/* Header Search Banner */}
-            <div className="bg-secondary/5 border border-secondary/10 rounded-xl p-8 flex flex-col items-center text-center space-y-4">
-              <h2 className="font-display font-extrabold text-secondary text-2xl md:text-3xl">Hocaya Göre Listele</h2>
-              <p className="text-sm text-text-muted max-w-2xl leading-relaxed">
-                İlgilendiğiniz hocaları bölümlere göre listeleyin ve verdikleri derslerin çan eğrisi ortalamalarını inceleyin.
-              </p>
-              
-              {/* Central Searchbox */}
-              <div className="relative w-full max-w-xl">
-                <Search size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted" />
-                <input 
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Hoca adını aratın..."
-                  className="w-full pl-11 pr-4 py-3 bg-white border border-gray-200 focus:border-secondary rounded-xl focus:ring-1 focus:ring-secondary shadow-sm text-sm"
-                />
-                {searchQuery && (
-                  <button 
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-4 top-1/2 -translate-y-1/2 p-1 rounded-full hover:bg-gray-100 text-gray-400"
-                  >
-                    <X size={14} />
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              
-              {/* Sidebar filter controls (Left 3 columns) */}
-              <aside className="lg:col-span-3 space-y-4">
-                <div className="sticky top-24 space-y-4 text-left">
-                  
-                  <span className="text-[11px] font-bold text-text-muted tracking-wider uppercase pl-1 block">
-                    BÖLÜMLER
-                  </span>
-
-                  <div className="flex flex-col gap-2">
-                    {[
-                      { key: 'iktisat', label: 'İktisat' },
-                      { key: 'isletme', label: 'İşletme' },
-                      { key: 'sbui', label: 'Siyaset Bilimi ve Uluslararası İlişkiler' },
-                      { key: 'ums', label: 'Üniversite Mesleki Seçmeli' },
-                      { key: 'uss', label: 'Üniversite Sosyal Seçmeli' }
-                    ].map(dept => (
-                      <button 
-                        key={dept.key}
-                        onClick={() => setSelectedDept(dept.key as any)}
-                        className={`flex justify-between items-center p-4 rounded-xl font-semibold text-sm transition-all text-left ${
-                          selectedDept === dept.key 
-                            ? 'bg-secondary text-white shadow-md' 
-                            : 'bg-white text-text-muted border border-gray-200/60 hover:bg-gray-50'
-                        }`}
-                      >
-                        <span>{dept.label}</span>
-                        <ChevronRight size={16} className={selectedDept === dept.key ? 'text-white' : 'text-gray-400'} />
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* Sidebar count tracker */}
-                  <div className="p-4 bg-white rounded-xl border border-gray-200/60 shadow-sm space-y-1">
-                    <p className="text-[10px] font-bold text-text-muted uppercase">Hoca Sayısı</p>
-                    <div className="flex items-baseline gap-2">
-                      <span className="text-3xl font-extrabold text-secondary">
-                        {groupedProfessors.length}
-                      </span>
-                      <span className="text-xs font-semibold text-text-muted">Kayıt Bulundu</span>
-                    </div>
-                  </div>
-
-                </div>
-              </aside>
-
-              {/* Main List (Right 9 columns) */}
-              <div className="lg:col-span-9 space-y-6 text-left">
-                {groupedProfessors.length > 0 ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {groupedProfessors.map(prof => (
-                      <div 
-                        key={prof.name}
-                        onClick={() => { setSelectedProfessorName(prof.name); setActiveScreen('professor_courses'); }}
-                        className="group bg-white rounded-xl p-6 border border-gray-200/60 hover:border-secondary hover:shadow-md transition-all cursor-pointer relative"
-                      >
-                        <div className="flex justify-between items-start mb-4">
-                          <div className="w-12 h-12 bg-secondary/10 rounded-full flex items-center justify-center text-secondary group-hover:scale-110 transition-transform">
-                            <User size={24} />
-                          </div>
-                          <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                            prof.tag === 'Zorlayıcı Hoca' ? 'bg-rose-500/10 text-rose-700' : 'bg-emerald-500/10 text-emerald-700'
-                          }`}>
-                            {prof.tag}
-                          </span>
-                        </div>
-                        <h4 className="font-extrabold text-lg text-secondary">{prof.name}</h4>
-                        <p className="text-xs text-text-muted mt-2">Farklı Ders Sayısı: {prof.courseCount}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="bg-white p-12 rounded-xl border border-gray-200 text-center space-y-3">
-                    <AlertTriangle className="text-amber-500 mx-auto" size={40} />
-                    <p className="font-bold text-gray-800">Seçili Kriterlerde Hoca Bulunamadı</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ==================== SCREEN: PROFESSOR COURSES ==================== */}
-        {activeScreen === 'professor_courses' && selectedProfessorName && (
-          <div className="animate-fade-in space-y-6 text-left">
-            <button 
-              onClick={() => setActiveScreen('professors_list')}
-              className="inline-flex items-center gap-2 text-text-muted hover:text-secondary transition-colors font-semibold text-sm cursor-pointer"
-            >
-              <ArrowLeft size={16} /> Hoca Listesine Geri Dön
-            </button>
-            
-            <div className="bg-secondary/5 border border-secondary/10 rounded-xl p-8 flex flex-col items-start space-y-2">
-              <span className="text-xs font-bold text-secondary px-3 py-1 bg-white rounded-full border border-secondary/20">{selectedProfessorName}</span>
-              <h2 className="font-display font-extrabold text-secondary text-2xl md:text-3xl">Verdiği Dersler</h2>
-              <p className="text-sm text-text-muted max-w-2xl leading-relaxed">
-                Hocanın açtığı dersleri inceleyin veya dönem detaylarına gidin.
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {(() => {
-                const profCourses = courses.filter(c => c.professorName === selectedProfessorName);
-                const uniqueCodes = Array.from(new Set(profCourses.map(c => c.code)));
-                return uniqueCodes.map(code => {
-                  const instances = profCourses.filter(c => c.code === code);
-                  const avgBell = instances.length > 0 ? instances.reduce((sum, c) => sum + (c.averageBell || 0), 0) / instances.length : 0;
-                  
-                  const totalPassed = instances.reduce((sum, c) => {
-                    const gd = c.gradesDistribution || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0,F0:0};
-                    return sum + (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
-                  }, 0);
-                  const totalStudents = instances.reduce((sum, c) => sum + c.totalStudents, 0);
-                  const passingRate = totalStudents > 0 ? (totalPassed / totalStudents) * 100 : 0;
-                  
-                  const score = calculateTagScore(passingRate, instances[0]?.attendanceStatus || 'none');
-                  const difficulty = score >= 50 ? 'Öğrenci Dostu Ders' : 'Zorlayıcı Ders';
-
-                  return (
-                    <div 
-                      key={code}
-                      onClick={() => { setSelectedCourseCode(code); setNavigationPath('prof_first'); setActiveScreen('course_professor_terms'); }}
-                      className="group bg-white rounded-xl p-6 border border-gray-200/60 hover:border-secondary hover:shadow-md transition-all cursor-pointer relative"
-                    >
-                      <div className="flex justify-between items-start mb-4">
-                        <span className="text-xs bg-gray-100 text-gray-800 font-bold px-2.5 py-1 rounded">
-                          {code}
-                        </span>
-                        <span className={`text-[11px] font-bold px-3 py-1 rounded-lg ${
-                          difficulty === 'Zorlayıcı Ders' ? 'bg-rose-500/10 text-rose-700' : 'bg-emerald-500/10 text-emerald-700'
-                        }`}>
-                          {difficulty}
-                        </span>
-                      </div>
-                      <h4 className="font-display font-extrabold text-lg text-secondary group-hover:text-primary transition-colors leading-snug">
-                        {instances[0].title}
-                      </h4>
-                      <p className="text-xs text-text-muted mt-2">Dönem Verisi: {instances.length}</p>
-                    </div>
-                  )
-                });
-              })()}
-            </div>
-          </div>
-        )}
-
         {/* ==================== SCREEN 2.5: COURSE PROFESSORS ==================== */}
         {activeScreen === 'course_professors' && selectedCourseCode && (
           <div className="animate-fade-in space-y-6 text-left">
@@ -1265,8 +1519,7 @@ export default function App() {
                   const totalStudents = profInstances.reduce((sum, c) => sum + c.totalStudents, 0);
                   const passingRate = totalStudents > 0 ? (totalPassed / totalStudents) * 100 : 0;
                   
-                  const score = calculateTagScore(passingRate, profInstances[0]?.attendanceStatus || 'none');
-                  const tag = score >= 50 ? 'Öğrenci Dostu Hoca' : 'Zorlayıcı Hoca';
+                  
 
                   return (
                     <div 
@@ -1278,11 +1531,7 @@ export default function App() {
                         <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
                           <User size={24} />
                         </div>
-                        <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                          tag === 'Zorlayıcı Hoca' ? 'bg-rose-500/10 text-rose-700' : 'bg-emerald-500/10 text-emerald-700'
-                        }`}>
-                          {tag}
-                        </span>
+                        
                       </div>
                       <h4 className="font-extrabold text-lg text-primary">{prof}</h4>
                       <p className="text-xs text-text-muted mt-2">Dönem Sayısı: {profInstances.length}</p>
@@ -1298,13 +1547,10 @@ export default function App() {
         {activeScreen === 'course_professor_terms' && selectedCourseCode && selectedProfessorName && (
           <div className="animate-fade-in space-y-6 text-left">
             <button 
-              onClick={() => {
-                if (navigationPath === 'course_first') setActiveScreen('course_professors');
-                else setActiveScreen('professor_courses');
-              }}
+              onClick={() => setActiveScreen('course_professors')}
               className="inline-flex items-center gap-2 text-text-muted hover:text-primary transition-colors font-semibold text-sm cursor-pointer"
             >
-              <ArrowLeft size={16} /> {navigationPath === 'course_first' ? 'Hoca Listesine' : 'Verdiği Derslere'} Geri Dön
+              <ArrowLeft size={16} /> Hoca Listesine Geri Dön
             </button>
             
             <div className="bg-primary/5 border border-primary/10 rounded-xl p-8 flex flex-col items-start space-y-2">
@@ -1319,8 +1565,7 @@ export default function App() {
               {courses.filter(c => c.code === selectedCourseCode && c.professorName === selectedProfessorName).map(termInstance => {
                 const passingRateStr = termInstance.passingRate !== undefined ? String(termInstance.passingRate) : "0";
                 const passingRate = parseFloat(passingRateStr);
-                const score = calculateTagScore(passingRate, termInstance.attendanceStatus || 'none');
-                const tag = score >= 50 ? 'Öğrenci Dostu Çan' : 'Zorlayıcı Çan';
+                const tag = calculateTagScore(passingRate, termInstance.attendanceStatus || 'none');
                 
                 return (
                   <div 
@@ -1330,11 +1575,15 @@ export default function App() {
                   >
                     <div className="flex justify-between items-start mb-4">
                       <div className="flex flex-col">
-                        <span className="text-xs text-text-muted mb-1 text-left uppercase tracking-wider">Dönem</span>
+                        <span className="text-xs text-text-muted mb-1 text-left uppercase tracking-wider">Dönem & Dil</span>
                         <h4 className="font-extrabold text-lg text-primary">{termInstance.term}</h4>
+                        {termInstance.language && (
+                          <span className="text-xs text-secondary mt-1 font-bold">{termInstance.language}</span>
+                        )}
                       </div>
                       <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                        tag === 'Zorlayıcı Çan' ? 'bg-rose-500/10 text-rose-700' : 'bg-emerald-500/10 text-emerald-700'
+                        tag === 'Zorlayıcı Çan' ? 'bg-rose-500/10 text-rose-700' : 
+                        tag === 'Öğrenci Dostu Çan' ? 'bg-emerald-500/10 text-emerald-700' : 'bg-amber-500/10 text-amber-700'
                       }`}>
                         {tag}
                       </span>
@@ -1371,43 +1620,26 @@ export default function App() {
                   {/* Metadata Row */}
                   <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-text-muted text-sm mt-2">
                     <span className="flex items-center gap-1.5 font-medium" title="Ders Kodu"><Code size={16} /> {currentCourse.code}</span>
-                    <button 
-                      onClick={() => {
-                        setSelectedTeacherId('mahmut_bilgeturk'); // Fallback trigger
-                        setActiveScreen('professor');
-                      }}
-                      className="flex items-center gap-1.5 hover:text-primary hover:underline font-semibold"
+                    <span 
+                      className="flex items-center gap-1.5 font-semibold"
                       title="Hocanın Ana Bölümü: İçerikte Gösterilir"
                     >
                       <User size={16} /> {currentCourse.professorName} {!currentCourse.professorName && currentCourse.profMainDept ? `(${currentCourse.profMainDept})` : ''}
-                    </button>
+                    </span>
                     <span className="flex items-center gap-1.5 font-medium"><Calendar size={16} /> {currentCourse.term}</span>
+                    <span className="flex items-center gap-1.5 font-bold text-xs bg-gray-100 px-2 py-1 rounded">Dil: {currentCourse.language || 'Türkçe'}</span>
                     <span className="flex items-center gap-1.5 font-bold text-xs bg-gray-100 px-2 py-1 rounded">Çan: {currentCourse.bellType || 'mutlak'}</span>
+  <span className={`flex items-center gap-1.5 font-bold text-[11px] px-2 py-1 rounded-lg ${
+    calculateTagScore((currentCourse.passingRate || 0), currentCourse.attendanceStatus || 'none') === 'Zorlayıcı Çan' ? 'bg-rose-500/10 text-rose-700' : 
+    calculateTagScore((currentCourse.passingRate || 0), currentCourse.attendanceStatus || 'none') === 'Öğrenci Dostu Çan' ? 'bg-emerald-500/10 text-emerald-700' : 'bg-amber-500/10 text-amber-700'
+  }`}>
+    {calculateTagScore((currentCourse.passingRate || 0), currentCourse.attendanceStatus || 'none')}
+  </span>
                     <span className="flex items-center gap-1.5 font-bold text-xs bg-gray-100 px-2 py-1 rounded">Hoca Blm: {currentCourse.profMainDept || 'Bilinmiyor'}</span>
                   </div>
                 </div>
 
-                {/* Quick actions: save, report */}
-                <div className="flex gap-2">
-                  <button 
-                    onClick={() => toggleBookmark(currentCourse.code)}
-                    className={`p-3 rounded-xl border transition-all flex items-center justify-center ${
-                      favorites.includes(currentCourse.code)
-                        ? 'bg-amber-500/10 text-amber-600 border-amber-300' 
-                        : 'bg-white border-gray-200 text-text-muted hover:border-primary hover:bg-gray-50'
-                    }`}
-                    title="Favorilere Kaydet"
-                  >
-                    <Bookmark size={20} fill={favorites.includes(currentCourse.code) ? "currentColor" : "none"} />
-                  </button>
-                  <button 
-                    onClick={() => showToast('Geri bildiriminiz yöneticilere iletildi. Teşekkürler.', 'info')}
-                    className="p-3 rounded-xl border border-gray-200 bg-white hover:border-rose-300 text-rose-500 hover:bg-rose-50/50 transition-all flex items-center justify-center"
-                    title="Hatalı Veri Bildir"
-                  >
-                    <AlertTriangle size={20} />
-                  </button>
-                </div>
+
               </div>
             </section>
 
@@ -1462,7 +1694,8 @@ export default function App() {
 
                   <div className="space-y-3.5">
                     {/* Maps distributions precisely dynamic percentage of total student */}
-                    {Object.entries(currentCourse.gradesDistribution).map(([grade, count]) => {
+                    {['AA', 'BA', 'BB', 'CB', 'CC', 'DC', 'DD', 'FD', 'FF', 'F0'].map((grade) => {
+                      const count = currentCourse.gradesDistribution[grade as keyof typeof currentCourse.gradesDistribution];
                       const total = (Object.values(currentCourse.gradesDistribution) as (number | undefined)[]).reduce((a: number, b: number | undefined) => a + (b || 0), 0);
                       const percent = total > 0 && typeof count === 'number' && !Number.isNaN(count) ? (count / total) * 100 : 0;
                       
@@ -1475,6 +1708,7 @@ export default function App() {
                       else if (grade === 'CC') { barColor = 'bg-emerald-500'; defaultThreshold = '45+'; }
                       else if (grade === 'DC') { barColor = 'bg-amber-500'; defaultThreshold = '40+'; }
                       else if (grade === 'DD') { barColor = 'bg-rose-500'; defaultThreshold = '30+'; }
+                      
                       else if (grade === 'FD') { barColor = 'bg-rose-500'; defaultThreshold = '20+'; }
                       else if (grade === 'FF') { barColor = 'bg-rose-500'; defaultThreshold = '0+'; }
                       else if (grade === 'F0') { barColor = 'bg-slate-600'; defaultThreshold = '0+'; }
@@ -1608,7 +1842,7 @@ export default function App() {
                       <Lock size={28} className="text-text-muted mb-2" />
                       <p className="text-xs font-bold text-primary mb-1">Açıklama Eklemek İçin Giriş Yapmalısınız</p>
                       <button 
-                        onClick={() => { setAuthRole('student'); showToast('Öğrenci girişi yapıldı!'); }}
+                        onClick={() => setActiveScreen('auth')}
                         className="w-full py-2 bg-secondary hover:bg-primary transition-all text-white font-bold text-xs rounded-lg shadow-sm mt-2"
                       >
                         Öğrenci Olarak Giriş Yap
@@ -1642,7 +1876,21 @@ export default function App() {
               <form onSubmit={handleFormSubmit} className="space-y-6">
                 
                 {/* Professor and Course row */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">HOCANIN ANA BÖLÜMÜ</label>
+                    <select 
+                      className="bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm focus:ring-1 focus:ring-primary focus:border-primary transition-all outline-none cursor-pointer"
+                      value={uploadForm.profMainDept}
+                      onChange={(e) => setUploadForm(p => ({ ...p, profMainDept: e.target.value }))}
+                    >
+                      <option value="İktisat">İktisat</option>
+                      <option value="İşletme">İşletme</option>
+                      <option value="SBUİ">SBUİ</option>
+                      <option value="ÜMS">ÜMS</option>
+                      <option value="ÜSS">ÜSS</option>
+                    </select>
+                  </div>
                   <div className="flex flex-col gap-1.5">
                     <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">PROFESÖR ADI</label>
                     <input 
@@ -1734,6 +1982,24 @@ export default function App() {
 
                 {/* Course chips selection year layout */}
                 <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">DERSİN DİLİ</label>
+                  <div className="relative">
+                    <select 
+                      value={uploadForm.language}
+                      onChange={(e) => setUploadForm(p => ({ ...p, language: e.target.value as any }))}
+                      className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm appearance-none focus:ring-1 focus:ring-primary focus:border-primary font-bold text-primary outline-none"
+                    >
+                      <option value="Türkçe">Türkçe</option>
+                      <option value="İngilizce">İngilizce</option>
+                      <option value="Diğer">Diğer</option>
+                    </select>
+                    <div className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-text-muted">
+                      <ChevronDown size={18} />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">DERSİN ALINDIĞI DÖNEM</label>
                   <div className="relative">
                     <select 
@@ -1792,36 +2058,52 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Simulated file uploader dropzone */}
+                                {/* File uploader dropzone */}
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">
-                    ÇAN EĞRİSİ GÖRÜNTÜSÜ VEYA PDF (EN FAZLA 300KB)
+                    ÇAN EĞRİSİ PDF DOSYASI (MAX: 300 KB)
                   </label>
                   
-                  <div 
-                    onClick={() => setUploadForm(p => ({ ...p, fileUploaded: true, fileName: 'YTU_OBS_BellCurve_IKN.pdf' }))}
-                    className={`mt-1 flex justify-center px-6 pt-8 pb-8 border-2 border-dashed rounded-2xl cursor-pointer transition-all relative ${
-                      uploadForm.fileUploaded 
-                        ? 'border-emerald-500 bg-emerald-500/5' 
-                        : 'border-gray-300 bg-gray-50 hover:border-primary hover:bg-gray-100'
-                    }`}
-                  >
-                    <div className="space-y-2 text-center">
+                  <div className="mt-1 relative flex justify-center px-6 pt-5 pb-6 border-2 border-dashed rounded-2xl cursor-pointer transition-all border-gray-300 bg-gray-50 hover:border-primary hover:bg-gray-100 group">
+                    <input 
+                      type="file" 
+                      accept=".pdf" 
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                           if (file.size > 300 * 1024) {
+                             showToast('Dosya boyutu 300 KB sınırını aşıyor.', 'error');
+                             return;
+                           }
+                           const reader = new FileReader();
+      reader.onload = (re) => {
+         const dataUrl = re.target?.result as string;
+         setUploadForm(p => ({ ...p, fileUploaded: true, fileName: file.name, fileData: dataUrl }));
+      }
+      reader.readAsDataURL(file);
+                        }
+                      }}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                    <div className="space-y-1 text-center">
                       {uploadForm.fileUploaded ? (
                         <>
                           <CheckCircle2 size={36} className="text-emerald-600 mx-auto animate-scale-up" />
-                          <div className="text-sm text-emerald-800">
-                            <strong>{uploadForm.fileName}</strong> başarıyla eklendi!
-                          </div>
+                          <p className="font-bold text-emerald-700 mt-2">{uploadForm.fileName}</p>
+                          <p className="text-xs text-emerald-600">Başarıyla eklendi (Değiştirmek için tıklayın)</p>
                         </>
                       ) : (
                         <>
-                          <Upload className="text-gray-400 mx-auto text-4xl stroke-[1.5]" size={36} />
-                          <div className="flex text-sm text-text-muted justify-center">
-                            <span className="text-primary font-bold hover:underline">Dosya seçin</span>
-                            <p className="pl-1">veya buraya sürükleyin</p>
+                          <Upload size={36} className="text-gray-400 group-hover:text-primary transition-colors mx-auto" />
+                          <div className="mt-4 flex text-sm leading-6 text-gray-600 justify-center">
+                            <span className="relative cursor-pointer rounded-md font-semibold text-primary focus-within:outline-none focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 hover:text-secondary">
+                              <span>Dosya Seç</span>
+                            </span>
+                            <p className="pl-1">veya sürükleyip bırakın</p>
                           </div>
-                          <p className="text-[10px] text-gray-400">İsteğe bağlı OBS Ekran Alıntısı (JPG, PNG, PDF)</p>
+                          <p className="text-xs text-gray-500">
+                            Sadece PDF (Maks: 300KB)
+                          </p>
                         </>
                       )}
                     </div>
@@ -1880,10 +2162,11 @@ export default function App() {
               
               {/* Left sidebar list: Pending submissions list */}
               <section className="lg:col-span-4 space-y-4">
-                <div className="bg-gray-100 p-1 flex rounded-xl border border-gray-200 mb-4">
+                <div className="bg-gray-100 p-1 flex rounded-xl border border-gray-200 mb-4 flex-wrap">
                   <button onClick={() => setSelectedAdminTab('pending')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'pending' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Onay Bekleyenler</button>
                   <button onClick={() => setSelectedAdminTab('direct')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'direct' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Doğrudan Veri Ekle</button>
                   <button onClick={() => setSelectedAdminTab('active')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'active' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Onaylanmışları Düzenle</button>
+                  <button onClick={() => setSelectedAdminTab('accounts')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'accounts' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Hesap Listesi</button>
                 </div>
 
                 {selectedAdminTab === 'active' && (
@@ -1909,13 +2192,14 @@ export default function App() {
                                 professorName: c.professorName,
                                 courseCode: c.code,
                                 term: c.term,
+                                language: c.language || 'Türkçe',
                                 averageBell: c.averageBell,
                                 stdDev: c.stdDev || 10,
                                 profMainDept: c.profMainDept || 'İktisat',
                                 bellType: c.bellType || 'mutlak',
                                 attendanceStatus: c.attendanceStatus || 'none',
                                 gradeThresholds: c.gradeThresholds || {AA:85, BA:75, BB:65, CB:55, CC:45, DC:40, DD:30, FD:20, FF:0},
-                                gradesDistribution: c.gradesDistribution || {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0, DD:0, FD:0, FF:0, F0:0},
+                                gradesDistribution: c.gradesDistribution || {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0,  FD:0, FF:0, F0:0},
                                 description: c.description || '',
                                 mappings: c.mappings || []
                               });
@@ -2026,10 +2310,172 @@ export default function App() {
                     </div>
                   </>
                 )}
+                {selectedAdminTab === 'accounts' && (
+                  <>
+                    <div className="flex items-center justify-between mb-2">
+                       <h3 className="font-display font-extrabold text-sm text-primary uppercase tracking-wider">
+                         Sistemdeki Hesaplar
+                       </h3>
+                       <span className="bg-primary text-white text-[10px] font-extrabold px-3 py-1 rounded-full">
+                         {visibleAccounts.length} Hesap
+                       </span>
+                    </div>
+                    <div className="space-y-3 max-h-[calc(100vh-250px)] overflow-y-auto pr-1">
+                      {visibleAccounts.map(acc => (
+                        <div
+                          key={acc.id}
+                          onClick={() => setActiveAccount(acc)}
+                          className={`group p-4 bg-white rounded-xl shadow-sm cursor-pointer transition-all hover:shadow-md border-2 text-left space-y-2 ${
+                            activeAccount?.id === acc.id 
+                                ? 'border-primary bg-primary/2' 
+                                : 'border-gray-100 hover:border-gray-200'
+                          }`}
+                        >
+                          <div className="flex flex-col items-start gap-1 w-full">
+                            <div className="flex w-full justify-between items-start">
+                              <span className="font-bold text-sm text-primary">{acc.googleName || 'Google İsmi Yok (Eski Kayıt)'}</span>
+                              <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${acc.role === 'admin' ? 'bg-amber-100 text-amber-700' : 'bg-primary/10 text-primary'}`}>
+                                {acc.role === 'admin' ? 'Yönetici' : 'Öğrenci'}
+                              </span>
+                            </div>
+                            <span className="text-[11px] font-semibold text-secondary px-2 py-1 bg-secondary/10 rounded-md mt-1">Kullanıcı Adı: @{acc.name}</span>
+                            <span className="text-xs text-text-muted">E-Posta: {acc.email}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </section>
-
               {/* Right main display page: Details editor and validations */}
               <section className="lg:col-span-8">
+                {selectedAdminTab === 'accounts' && activeAccount && editAccountForm && (() => {
+                  const userCourses = courses.filter(c => c.uploadedBy === activeAccount.name);
+                  const total = userCourses.length;
+                  const lastUploadDate = total > 0 ? userCourses[userCourses.length - 1].uploadedDate : 'Henüz paylaşım yok';
+                  
+                  return (
+                    <div className="bg-white rounded-2xl border border-gray-200 shadow-xl overflow-hidden animate-scale-up p-6 md:p-8 text-left space-y-6">
+                      <div className="flex items-center gap-4 pb-4 border-b border-gray-100">
+                        <div className="w-14 h-14 bg-primary/10 text-primary rounded-full flex items-center justify-center">
+                          <User size={28} />
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-display font-bold text-primary">Hesap Bilgilerini Düzenle</h2>
+                          <p className="text-xs text-text-muted">ID: #{activeAccount.id} • Kayıt Tarihi: {activeAccount.joinDate}</p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-primary uppercase tracking-wider block">Google Hesap İsmi</label>
+                          <input 
+                            type="text"
+                            className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-4 py-3 text-sm rounded-xl outline-none"
+                            value={editAccountForm.googleName || ""}
+                            onChange={(e) => setEditAccountForm((prev: any) => ({ ...prev, googleName: e.target.value }))}
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-primary uppercase tracking-wider block">Kullanıcı Adı</label>
+                          <input 
+                            type="text"
+                            className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-4 py-3 text-sm rounded-xl outline-none"
+                            value={editAccountForm.name || ""}
+                            onChange={(e) => setEditAccountForm((prev: any) => ({ ...prev, name: e.target.value }))}
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-primary uppercase tracking-wider block">E-Posta Adresi</label>
+                          <input 
+                            type="email"
+                            className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-4 py-3 text-sm rounded-xl outline-none"
+                            value={editAccountForm.email || ""}
+                            onChange={(e) => setEditAccountForm((prev: any) => ({ ...prev, email: e.target.value }))}
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-bold text-primary uppercase tracking-wider block">Hesap Türü (Yetki)</label>
+                          <select 
+                            className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-4 py-3 text-sm rounded-xl outline-none cursor-pointer"
+                            value={editAccountForm.role || "student"}
+                            onChange={(e) => setEditAccountForm((prev: any) => ({ ...prev, role: e.target.value }))}
+                          >
+                            <option value="student">Öğrenci</option>
+                            <option value="admin">Yönetici (Admin)</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="bg-gray-50 border border-gray-100 rounded-xl p-4 grid grid-cols-2 gap-4">
+                        <div>
+                          <span className="text-[10px] font-bold text-text-muted uppercase tracking-wider block mb-1">Toplam Paylaşım</span>
+                          <span className="font-bold text-primary text-sm">{total} Çan Eğrisi</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold text-text-muted uppercase tracking-wider block mb-1">En Son Paylaşım</span>
+                          <span className="font-bold text-primary text-sm">{lastUploadDate}</span>
+                        </div>
+                      </div>
+
+                      <div className="pt-4 border-t border-gray-100 flex flex-col sm:flex-row justify-between items-center gap-4">
+                        <div className="flex items-center gap-3">
+                          <span className="text-xs font-bold text-primary uppercase tracking-wider">Durum:</span>
+                          {editAccountForm.isBanned ? (
+                            <span className="px-3 py-1 bg-rose-100 text-rose-700 text-xs font-bold rounded-full">Yasaklı (Erişim Kapalı)</span>
+                          ) : (
+                            <span className="px-3 py-1 bg-emerald-100 text-emerald-700 text-xs font-bold rounded-full">Aktif (Yetkili)</span>
+                          )}
+                        </div>
+
+                        <div className="flex gap-2 w-full sm:w-auto">
+                          {editAccountForm.isBanned ? (
+                            <button
+                              type="button"
+                              onClick={() => setEditAccountForm((prev: any) => ({ ...prev, isBanned: false }))}
+                              className="px-4 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 font-bold text-xs rounded-xl transition-all"
+                            >
+                              Yasağı Kaldır
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setEditAccountForm((prev: any) => ({ ...prev, isBanned: true }))}
+                              className="px-4 py-2 bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 font-bold text-xs rounded-xl transition-all"
+                            >
+                              Hesabı Yasakla
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={handleDeleteAccount}
+                            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-xl transition-all shadow-sm"
+                          >
+                            Hesabı Sil
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleSaveAccountChanges}
+                            className="bg-primary hover:bg-[#00112a] text-white font-bold text-xs px-5 py-2 rounded-xl transition-all shadow"
+                          >
+                            Kaydet
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              {selectedAdminTab === 'accounts' && !activeAccount && (
+                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-12 text-center animate-fade-in flex flex-col items-center mt-4">
+                    <User size={48} className="text-gray-300 mb-4" />
+                    <h3 className="text-sm font-bold text-text-muted">Ayrıntıları görmek için bir hesap seçin.</h3>
+                 </div>
+              )}
                 {selectedAdminTab === 'pending' && pendings.length > 0 && currentPending ? (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-xl overflow-hidden animate-scale-up">
                     
@@ -2069,7 +2515,7 @@ export default function App() {
 
                         <div className="aspect-[3/4] bg-background-gray rounded-xl border-2 border-dashed border-gray-300 flex items-center justify-center relative overflow-hidden group">
                           {currentPending.fileUrl ? (
-                            currentPending.fileUrl.toLowerCase().endsWith('.pdf') ? (
+                            (currentPending.fileUrl.toLowerCase().endsWith('.pdf') || currentPending.fileUrl.startsWith('data:application/pdf')) ? (
                               <iframe 
                                 src={currentPending.fileUrl} 
                                 title="Grade Report Document PDF" 
@@ -2145,17 +2591,39 @@ export default function App() {
                             />
                           </div>
 
+                                                    <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-text-muted uppercase">Ders Dili</label>
+                            <select 
+                              className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none cursor-pointer" 
+                              value={currentPending.language || 'Türkçe'}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setPendings(prev => prev.map(p => p.id === currentPending.id ? { ...p, language: val as any } : p));
+                              }}
+                            >
+                              <option value="Türkçe">Türkçe</option>
+                              <option value="İngilizce">İngilizce</option>
+                              <option value="Diğer">Diğer</option>
+                            </select>
+                          </div>
+
                           <div className="space-y-1">
                             <label className="text-[10px] font-bold text-text-muted uppercase">Dönem</label>
-                            <input 
-                              type="text" 
-                              className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" 
+                            <select 
+                              className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none cursor-pointer" 
                               value={currentPending.term || ''}
                               onChange={(e) => {
                                 const val = e.target.value;
                                 setPendings(prev => prev.map(p => p.id === currentPending.id ? { ...p, term: val } : p));
                               }}
-                            />
+                            >
+                              <option value="2025-2026 Güz">2025-2026 Güz</option>
+                              <option value="2025-2026 Bahar">2025-2026 Bahar</option>
+                              <option value="2024-2025 Güz">2024-2025 Güz</option>
+                              <option value="2024-2025 Bahar">2024-2025 Bahar</option>
+                              <option value="2023-2024 Güz">2023-2024 Güz</option>
+                              <option value="2023-2024 Bahar">2023-2024 Bahar</option>
+                            </select>
                           </div>
 
                           <div className="pt-2 col-span-2">
@@ -2333,7 +2801,7 @@ export default function App() {
                                   type="number"
                                   title="Öğrenci Sayısı"
                                   placeholder="sayı"
-                                  value={currentPending.gradesDistribution?.[grade as keyof typeof currentPending.gradesDistribution] ?? 0}
+                                  value={(grade === 'F0' && (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing')) ? 0 : (currentPending.gradesDistribution?.[grade as keyof typeof currentPending.gradesDistribution] ?? 0)} disabled={grade === 'F0' && (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing')}
                                   onChange={(e) => {
                                     const val = parseInt(e.target.value) || 0;
                                     setPendings(prev => prev.map(p => {
@@ -2439,6 +2907,18 @@ export default function App() {
                       <div className="space-y-1 col-span-2 sm:col-span-1">
                         <label className="text-[10px] font-bold text-text-muted uppercase">Ders Kodu</label>
                         <input type="text" className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" value={adminDirectForm.courseCode} onChange={(e) => setAdminDirectForm(prev => ({...prev, courseCode: e.target.value}))} />
+                      </div>
+                      <div className="space-y-1 col-span-2 sm:col-span-1">
+                        <label className="text-[10px] font-bold text-text-muted uppercase">Ders Dili</label>
+                        <select 
+                          className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none cursor-pointer" 
+                          value={adminDirectForm.language} 
+                          onChange={(e) => setAdminDirectForm(prev => ({...prev, language: e.target.value as any}))}
+                        >
+                          <option value="Türkçe">Türkçe</option>
+                          <option value="İngilizce">İngilizce</option>
+                          <option value="Diğer">Diğer</option>
+                        </select>
                       </div>
                       <div className="space-y-1 col-span-2 sm:col-span-1">
                         <label className="text-[10px] font-bold text-text-muted uppercase">Dönem</label>
@@ -2584,13 +3064,25 @@ export default function App() {
                                 type="number"
                                 title="Öğrenci Sayısı"
                                 placeholder="sayı"
-                                value={adminDirectForm.gradesDistribution?.[grade as keyof typeof adminDirectForm.gradesDistribution] ?? 0}
+                                value={(grade === 'F0' && (adminDirectForm.attendanceStatus === 'none' || adminDirectForm.attendanceStatus === 'not_failing')) ? 0 : (adminDirectForm.gradesDistribution?.[grade as keyof typeof adminDirectForm.gradesDistribution] ?? 0)} disabled={grade === 'F0' && (adminDirectForm.attendanceStatus === 'none' || adminDirectForm.attendanceStatus === 'not_failing')}
                                 onChange={(e) => setAdminDirectForm(prev => ({ ...prev, gradesDistribution: { ...prev.gradesDistribution, [grade]: parseInt(e.target.value) || 0 } }))}
                                 className="w-full text-center text-xs font-bold leading-none bg-transparent border-none p-0 focus:ring-0 mt-1 placeholder:font-normal placeholder:opacity-50"
                               />
                             </div>
                           ))}
                         </div>
+                      </div>
+                      <div className="pt-4 col-span-2">
+                        <label className="text-[10px] font-bold text-primary uppercase tracking-wider block mb-2">
+                          Öğrenci Notu / Açıklama (Opsiyonel)
+                        </label>
+                        <textarea
+                          placeholder="Dersin zorluğu, hocanın tavrı hakkındaki görüşlerini belirt..."
+                          rows={2}
+                          value={adminDirectForm.description}
+                          onChange={(e) => setAdminDirectForm(prev => ({ ...prev, description: e.target.value }))}
+                          className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none resize-none"
+                        ></textarea>
                       </div>
                     </div>
                   </div>
@@ -2624,6 +3116,18 @@ export default function App() {
                       <div className="space-y-1 col-span-2 sm:col-span-1">
                         <label className="text-[10px] font-bold text-text-muted uppercase">Ders Kodu</label>
                         <input type="text" className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none" value={activeAdminForm.courseCode} onChange={(e) => setActiveAdminForm(prev => ({...prev, courseCode: e.target.value}))} />
+                      </div>
+                      <div className="space-y-1 col-span-2 sm:col-span-1">
+                        <label className="text-[10px] font-bold text-text-muted uppercase">Ders Dili</label>
+                        <select 
+                          className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none cursor-pointer" 
+                          value={activeAdminForm.language || 'Türkçe'} 
+                          onChange={(e) => setActiveAdminForm(prev => ({...prev, language: e.target.value as any}))}
+                        >
+                          <option value="Türkçe">Türkçe</option>
+                          <option value="İngilizce">İngilizce</option>
+                          <option value="Diğer">Diğer</option>
+                        </select>
                       </div>
                       <div className="space-y-1 col-span-2 sm:col-span-1">
                         <label className="text-[10px] font-bold text-text-muted uppercase">Dönem</label>
@@ -2769,13 +3273,25 @@ export default function App() {
                                 type="number"
                                 title="Öğrenci Sayısı"
                                 placeholder="sayı"
-                                value={activeAdminForm.gradesDistribution?.[grade as keyof typeof activeAdminForm.gradesDistribution] ?? 0}
+                                value={(grade === 'F0' && (activeAdminForm.attendanceStatus === 'none' || activeAdminForm.attendanceStatus === 'not_failing')) ? 0 : (activeAdminForm.gradesDistribution?.[grade as keyof typeof activeAdminForm.gradesDistribution] ?? 0)} disabled={grade === 'F0' && (activeAdminForm.attendanceStatus === 'none' || activeAdminForm.attendanceStatus === 'not_failing')}
                                 onChange={(e) => setActiveAdminForm(prev => ({ ...prev, gradesDistribution: { ...prev.gradesDistribution, [grade]: parseInt(e.target.value) || 0 } }))}
                                 className="w-full text-center text-xs font-bold leading-none bg-transparent border-none p-0 focus:ring-0 mt-1 placeholder:font-normal placeholder:opacity-50"
                               />
                             </div>
                           ))}
                         </div>
+                      </div>
+                      <div className="pt-4 col-span-2">
+                        <label className="text-[10px] font-bold text-primary uppercase tracking-wider block mb-2">
+                          Öğrenci Notu / Açıklama (Opsiyonel)
+                        </label>
+                        <textarea
+                          placeholder="Dersin zorluğu, hocanın tavrı hakkındaki görüşlerini belirt..."
+                          rows={2}
+                          value={activeAdminForm.description}
+                          onChange={(e) => setActiveAdminForm(prev => ({ ...prev, description: e.target.value }))}
+                          className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none resize-none"
+                        ></textarea>
                       </div>
                     </div>
                   </div>
@@ -2804,204 +3320,21 @@ export default function App() {
                   <p className="text-sm font-bold text-primary">{pendings.length} Ders</p>
                 </div>
               </div>
-              <div className="bg-white p-4 rounded-xl border border-gray-100 flex items-center gap-4 text-rose-600">
-                <div className="w-10 h-10 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center shrink-0">
-                  <AlertCircle size={18} />
-                </div>
-                <div>
-                  <p className="text-[10px] font-bold text-rose-500 uppercase">Hatalı Bildirim Alan Ders</p>
-                  <p className="text-sm font-bold">0 Bildirim</p>
-                </div>
-              </div>
-            </div>
-
-          </div>
-        )}
-
-        {/* ==================== SCREEN 6: PROFESSOR PROFILE ("Hoca Profili") ==================== */}
-        {activeScreen === 'professor' && currentTeacher && (
-          <div className="animate-fade-in space-y-6 text-left max-w-4xl mx-auto">
-            
-            {/* Header Profil Card */}
-            <section className="bg-white p-8 rounded-2xl border border-gray-200/60 shadow-md relative overflow-hidden flex flex-col items-center text-center space-y-4">
-              <div className="z-10 bg-primary/5 w-16 h-16 rounded-2xl flex items-center justify-center text-primary">
-                <User size={36} className="stroke-[1.5]" />
-              </div>
-              <div className="z-10 space-y-3">
-                <h2 className="font-display font-extrabold text-2xl md:text-3xl text-primary">
-                  {currentTeacher.name}
-                </h2>
-                
-                <div className="flex flex-wrap justify-center gap-2">
-                  <span className="inline-flex items-center gap-1 px-3 py-1 bg-primary text-white text-[10px] font-bold rounded-lg leading-none shadow-sm">
-                    <ThumbsUp size={11} fill="currentColor" />
-                    ÖĞRENCİ DOSTU HOCA
-                  </span>
-                  <span className="inline-flex items-center gap-1 px-3 py-1 bg-gray-100 text-gray-800 text-[10px] font-bold rounded-lg leading-none border border-gray-200">
-                    İKTİSAT BÖLÜMÜ
-                  </span>
-                </div>
-              </div>
-            </section>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-
-              {/* Professor curve history Terms logs (Left column - 8 cols) */}
-              <div className="md:col-span-8 space-y-4">
-                <div className="border-b border-gray-200 pb-2">
-                  <h3 className="font-display font-extrabold text-primary text-lg">Ders Geçmişi &amp; Harf Çan Verileri</h3>
-                  <p className="text-xs text-text-muted mt-1">Öğretmenimizin OBS üzerindeki son değerlendirmeleri</p>
-                </div>
-
-                {/* List dynamic terms */}
-                <div className="space-y-4">
-                  {MAHMUT_TERMS.map((term, idx) => (
-                    <div 
-                      key={idx}
-                      className="bg-white p-6 rounded-2xl border border-gray-200/60 hover:border-primary transition-all shadow-sm space-y-4 group"
-                    >
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <p className="text-[10px] text-text-muted font-bold tracking-wider uppercase leading-none mb-1">
-                            ÖLÇÜM DÖNEMİ
-                          </p>
-                          <h4 className="font-display font-extrabold text-primary text-lg">{term.term}</h4>
-                        </div>
-                        <span className={`px-2.5 py-1 text-[10px] font-bold rounded-lg leading-none uppercase ${
-                          term.gradeLabel === 'İyi Çan' ? 'bg-emerald-500/10 text-emerald-700' :
-                          term.gradeLabel === 'Vasat Çan' ? 'bg-amber-500/10 text-amber-700' : 'bg-rose-500/10 text-rose-700'
-                        }`}>
-                          {term.gradeLabel}
-                        </span>
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-xs font-semibold text-text-muted">
-                          <span>Sınıf Harf Ortalaması</span>
-                          <span className="font-extrabold text-primary">{term.average}</span>
-                        </div>
-                        <div className="w-full bg-gray-100 h-2.5 rounded-full overflow-hidden relative">
-                          <div 
-                            className="bg-primary h-full rounded-full transition-all duration-1000" 
-                            style={{ width: `${term.average}%` }}
-                          ></div>
-                        </div>
-                      </div>
-
-                      <div className="flex justify-between items-center text-xs pt-1 border-t border-gray-50">
-                        <span className="text-[11px] text-text-muted">Min. Geçme Not Barajı: <strong>{term.passingGrade}</strong></span>
-                        <button 
-                          onClick={() => { setSelectedCourseId('IKT2001'); setActiveScreen('detail'); }}
-                          className="text-secondary hover:underline flex items-center gap-1 font-bold"
-                        >
-                          Eğriyi Göster <ArrowRight size={12} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Comments & Reviews list sidebar (Right column - 4 cols) */}
-              <div className="md:col-span-4 space-y-6">
-                
-                <div className="border-b border-gray-200 pb-2">
-                  <h3 className="font-display font-extrabold text-primary text-lg">Hoca Değerlendirmeleri</h3>
-                </div>
-
-                <div className="space-y-4">
-                  
-                  {/* Review comment 1 */}
-                  <div className="bg-white p-4 rounded-xl border border-gray-200/80 shadow-sm space-y-3">
-                    <div className="flex items-center gap-2">
-                      <div className="w-8 h-8 rounded bg-gray-100 text-primary flex items-center justify-center font-bold text-xs shrink-0">
-                        İY
-                      </div>
-                      <div>
-                        <span className="text-xs font-bold text-primary block leading-none">İktisat 3. Sınıf</span>
-                        <span className="text-[9px] text-text-muted leading-none">2 gün önce</span>
-                      </div>
-                    </div>
-                    <p className="text-xs text-text-muted leading-relaxed">
-                      Mahmut hoca gerçekten çok adaletli bir hocadır. Sorular zor olsa da çanı her zaman öğrenci lehine ayarlamaya çalışır. Derste not tutmak çok önemli.
-                    </p>
-                  </div>
-
-                  {/* Review comment 2 */}
-                  <div className="bg-white p-4 rounded-xl border border-gray-200/80 shadow-sm space-y-3">
-                    <div className="flex items-center gap-2">
-                      <div className="w-8 h-8 rounded bg-gray-100 text-primary flex items-center justify-center font-bold text-xs shrink-0">
-                        AM
-                      </div>
-                      <div>
-                        <span className="text-xs font-bold text-primary block leading-none">Anonim Mezun</span>
-                        <span className="text-[9px] text-text-muted leading-none">1 hafta önce</span>
-                      </div>
-                    </div>
-                    <p className="text-xs text-text-muted leading-relaxed">
-                      Vize soruları çıkmışlara benzer gelir ama finalde ters köşe yapabilir. Çanı genellikle yüksektir, çalışanı üzmez.
-                    </p>
-                  </div>
-
-                  {/* Login gate prompt comments */}
-                  <div className="bg-gray-50 border border-dashed border-gray-200 rounded-xl p-5 text-center space-y-3 animate-fade-in text-primary">
-                    <Lock size={24} className="text-text-muted mx-auto" />
-                    <h5 className="font-bold text-xs">Değerlendirme Eklemek İçin Giriş Yapın</h5>
-                    <p className="text-[10px] text-text-muted">Sadece doğrulanmış mezun veya aktif öğrenciler yorum yapabilir.</p>
-                    <button 
-                      onClick={() => { setAuthRole('student'); showToast('Giriş Yapıldı.'); }}
-                      className="w-full bg-primary hover:bg-[#001735] text-white py-2 rounded-lg font-bold text-xs transition-all shadow"
-                    >
-                      Hemen Giriş Yap
-                    </button>
-                  </div>
-
-                </div>
-
-              </div>
 
             </div>
 
           </div>
         )}
 
-        {/* ==================== SCREEN 7: ACCOUNT PROFILE ("Ahmet Yılmaz Profile") ==================== */}
+        {/* ==================== SCREEN 7: ACCOUNT PROFILE ("{currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : 'Yıldız Öğrencisi'} Profile") ==================== */}
         {activeScreen === 'profile' && (
           <div className="animate-fade-in space-y-6 text-left max-w-4xl mx-auto">
             
             {/* Header Identity banner */}
-            <section className="bg-white p-6 md:p-8 rounded-2xl border border-gray-200/60 shadow-md flex flex-col md:flex-row items-center gap-6 text-center md:text-left">
-              <div className="relative group shrink-0">
-                <img 
-                  src={INITIAL_USER.avatarUrl} 
-                  alt="Ahmet Yılmaz headshot portrait" 
-                  className="w-24 h-24 md:w-28 md:h-28 rounded-full border-4 border-white shadow-lg object-cover"
-                />
-                <button 
-                  onClick={() => showToast('Görsel düzenleme modülü yakında aktif olacaktır.', 'info')}
-                  className="absolute bottom-1 right-1 bg-secondary hover:bg-primary text-white p-2 rounded-full border-2 border-white shadow-md cursor-pointer transition-colors"
-                >
-                  <PlusCircle size={14} className="stroke-[2.5]" />
-                </button>
-              </div>
-
-              <div className="space-y-3">
-                <h2 className="font-display font-extrabold text-2xl md:text-3xl text-primary leading-none">
-                  {INITIAL_USER.name}
-                </h2>
-                <p className="text-sm text-text-muted flex items-center justify-center md:justify-start gap-1.5 font-semibold">
-                  <School size={16} />
-                  {INITIAL_USER.studentClass}
-                </p>
-                <div className="flex flex-wrap justify-center md:justify-start gap-2 pt-1">
-                  <span className="px-3 py-1 bg-gray-100 text-text-muted rounded-full text-[10px] font-bold border border-gray-200 leading-none">
-                    YTÜ İİBF
-                  </span>
-                  <span className="px-3 py-1 bg-primary/10 text-primary rounded-full text-[10px] font-bold leading-none">
-                    KATKIDA BULUNAN (CONTRIBUTOR)
-                  </span>
-                </div>
-              </div>
+            <section className="bg-white p-6 md:p-8 rounded-2xl border border-gray-200/60 shadow-md flex justify-center text-center">
+              <h2 className="font-display font-extrabold text-3xl md:text-4xl text-primary leading-none">
+                {currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : INITIAL_USER.name}
+              </h2>
             </section>
 
             <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
@@ -3014,94 +3347,75 @@ export default function App() {
                     onClick={() => { setSelectedDept('iktisat'); setActiveScreen('courses'); }}
                     className="text-xs font-bold text-secondary hover:underline cursor-pointer"
                   >
-                    Tümünü Gör
+                    Tüm Çan Eğrilerini Gör
                   </span>
                 </div>
 
                 <div className="flex flex-col gap-3">
-                  {[
-                    { code: 'IKT3121', title: 'IKT3121 - Ekonometri I', meta: '2023 Güz • Çan Verisi', date: '12 Eki' },
-                    { code: 'IKT3001', title: 'IKT3001 - Mikro İktisat', meta: '2023 Güz • Vize Notları', date: '05 Eki' }
-                  ].map((up, i) => (
-                    <div 
-                      key={i}
-                      onClick={() => { setSelectedCourseId('IKT3121'); setActiveScreen('detail'); }}
-                      className="flex items-center justify-between p-4 border border-gray-100 hover:border-primary rounded-xl hover:bg-gray-50/50 transition-all cursor-pointer"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 bg-primary/5 rounded-lg flex items-center justify-center text-primary">
-                          <FileText size={20} />
-                        </div>
-                        <div>
-                          <p className="text-sm font-bold text-primary">{up.title}</p>
-                          <p className="text-xs text-text-muted">{up.meta}</p>
-                        </div>
-                      </div>
-                      <span className="text-xs text-text-muted font-bold whitespace-nowrap">{up.date}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+                  {(() => {
+                    const uName = currentUser ? (currentUser.displayName || 'İsimsiz Kullanıcı') : '';
+                    
+                    const userApproved = courses
+                      .filter(c => c.uploadedBy && c.uploadedBy.toLowerCase() === uName.toLowerCase())
+                      .map(c => ({ title: c.title, code: c.code, prof: c.professorName, date: c.uploadedDate || '', status: 'approved' }));
+                      
+                    const userPendings = pendings
+                      .filter(p => p.applicantName && p.applicantName.toLowerCase() === uName.toLowerCase())
+                      .map(p => ({ title: p.courseTitle, code: p.courseCode || 'Belirsiz', prof: p.professorName, date: p.date || '', status: 'pending' }));
 
-              {/* Favorites bookmark list (Right 4 cols) */}
-              <div className="md:col-span-4 bg-white border border-gray-200 rounded-2xl p-6 shadow-sm space-y-4">
-                <h3 className="font-display font-extrabold text-primary text-base pb-2 border-b border-gray-100">
-                  Kaydedilenler
-                </h3>
+                    const combined = [...userApproved, ...userPendings];
 
-                <div className="flex flex-col gap-2">
-                  {favorites.length > 0 ? (
-                    favorites.map((favCode, i) => {
-                      const course = courses.find(c => c.code === favCode);
+                    if (combined.length === 0) {
                       return (
-                        <div 
-                          key={i}
-                          onClick={() => { 
-                            if (course) {
-                              setSelectedCourseId(course.id); 
-                              setActiveScreen('detail'); 
-                            } else {
-                              showToast('Seçilen kaydedilmiş çan verisi arşive taşınmış.', 'info');
-                            }
-                          }}
-                          className="p-3 bg-gray-50 hover:bg-primary/5 border border-gray-100 rounded-xl hover:border-primary transition-all cursor-pointer flex items-center gap-3"
-                        >
-                          <Bookmark size={16} className="text-secondary shrink-0" fill="currentColor" />
-                          <span className="text-xs font-bold text-primary">{course ? course.title : favCode}</span>
+                        <div className="text-center py-6">
+                          <p className="text-sm text-text-muted">Açıklanan veya Bekleyen paylaşımınız bulunmuyor.</p>
+                          <button 
+                            onClick={() => setActiveScreen('upload')}
+                            className="mt-3 text-xs font-bold text-primary border border-gray-200 px-4 py-2 rounded-lg hover:border-primary transition-colors"
+                          >
+                            Hemen İlk Çan Eğrini Paylaş
+                          </button>
                         </div>
                       );
-                    })
-                  ) : (
-                    <p className="text-xs font-semibold text-text-muted italic text-center py-4">Kaydedilmiş öğe bulunamadı.</p>
-                  )}
+                    }
+
+                    return combined.map((up, i) => (
+                      <div 
+                        key={i}
+                        className="flex items-center justify-between p-4 border border-gray-100 rounded-xl bg-gray-50/50"
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${up.status === 'approved' ? 'bg-emerald-500/10 text-emerald-600' : 'bg-primary/5 text-primary'}`}>
+                            <FileText size={20} />
+                          </div>
+                          <div>
+                            <p className="text-sm font-bold text-primary">{up.code} - {up.title}</p>
+                            <p className="text-xs text-text-muted">{up.prof} • {up.status === 'pending' ? 'Onay Bekliyor' : 'Onaylandı'}</p>
+                          </div>
+                        </div>
+                        <span className="text-xs text-text-muted font-bold whitespace-nowrap">{up.date}</span>
+                      </div>
+                    ));
+                  })()}
                 </div>
               </div>
-
               {/* Profile setup configuration elements */}
               <div className="md:col-span-12 bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
                 <h3 className="font-display font-extrabold text-primary text-base pb-3 border-b border-gray-100">Hesap Ayarları</h3>
                 
                 <div className="divide-y divide-gray-100">
-                  {[
-                    { label: 'Profil Bilgileri', val: 'İletişim ve Fakülte Maili' },
-                    { label: 'Bildirim Ayarları', val: 'Anlık Çan Güncellemeleri' },
-                    { label: 'Güvenlik', val: 'Şifre ve Şifreleme Anahtarları' }
-                  ].map((setting, i) => (
-                    <div 
-                      key={i} 
-                      onClick={() => showToast('İlgili hesap yönetim paneli şu an salt-okunurdur.', 'info')}
-                      className="py-4 flex justify-between items-center cursor-pointer group hover:bg-gray-50 px-2 rounded-lg transition-colors"
-                    >
-                      <div className="flex items-center gap-4 text-primary font-semibold text-sm">
-                        <Settings size={18} className="text-text-muted group-hover:text-primary transition-colors" />
-                        <div>
-                          <p>{setting.label}</p>
-                          <p className="text-[10px] text-text-muted font-normal mt-0.5">{setting.val}</p>
-                        </div>
+                  <div 
+                    onClick={() => showToast('İlgili hesap yönetim paneli şu an salt-okunurdur.', 'info')}
+                    className="py-4 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 cursor-pointer group hover:bg-gray-50 px-3 rounded-lg transition-colors"
+                  >
+                    <div className="flex items-center gap-4 text-primary font-semibold text-sm">
+                      <Settings size={18} className="text-text-muted group-hover:text-primary transition-colors" />
+                      <div>
+                        <p>Genel Kullanıcı Bilgileri</p>
+                        <p className="text-[10px] text-text-muted font-normal mt-0.5">E-Posta: {currentUser?.email || "Bilinmiyor"}</p>
                       </div>
-                      <ChevronRight size={16} className="text-gray-400 group-hover:translate-x-1 transition-transform" />
                     </div>
-                  ))}
+                  </div>
                 </div>
               </div>
 
@@ -3110,14 +3424,16 @@ export default function App() {
             {/* Logout active actions trigger */}
             <button 
               onClick={() => {
+                signOut(auth).then(() => {
                 setAuthRole('guest');
                 setActiveScreen('home');
                 showToast('Hızlı çıkış başarılı.');
+              }).catch(() => showToast('Çıkış yapılamadı, lütfen tekrar deneyin.', 'error'));
               }}
-              className="px-6 py-3 rounded-xl border-2 border-rose-200 text-rose-600 font-bold text-sm flex items-center justify-center gap-2 hover:bg-rose-50 transition-all cursor-pointer active:scale-98"
+              className="px-6 py-3 rounded-xl border border-rose-200 text-rose-600 font-bold text-sm bg-white flex items-center justify-center gap-2 hover:bg-rose-50 transition-all cursor-pointer w-full text-center"
             >
               <LogOut size={16} />
-              Çıkış Yap (Güvenli Ayrıl)
+              Çıkış Yap
             </button>
 
           </div>
@@ -3128,8 +3444,8 @@ export default function App() {
       {/* Footer copyright note */}
       <footer className="mt-20 py-10 bg-white border-t border-gray-200/60 text-center text-xs text-text-muted">
         <div className="max-w-[1280px] mx-auto px-6 space-y-2">
-          <p className="font-bold text-[#00193c]">Yıldız Teknik Üniversitesi • İİBF Çan Dağılım Paylaşım Portalı</p>
-          <p>© 2026. Tüm Hakları Saklıdır. Eğitim amaçlı topluluk projesi.</p>
+          <p className="font-bold text-[#00193c]">Yıldız Çan • YTÜ İİBF Çan Portalı</p>
+          <p>© 2026. Mahmut Hoca'nın öğrencileri tarafından sevgiyle yapılmıştır.</p>
         </div>
       </footer>
 
@@ -3173,9 +3489,7 @@ export default function App() {
             if (authRole === 'student') {
               setActiveScreen('profile');
             } else {
-              setAuthRole('student');
-              setActiveScreen('profile');
-              showToast('Ahmet Yılmaz oturumu açıldı.');
+              setActiveScreen('auth');
             }
           }}
           className={`flex flex-col items-center justify-center gap-1 cursor-pointer ${
