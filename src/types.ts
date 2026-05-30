@@ -132,3 +132,17 @@ export interface User {
   uploadedCourses: string[]; // course IDs
   googleName?: string;
 }
+
+export interface Report {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  type: 'bug' | 'request' | 'other';
+  title: string;
+  description: string;
+  date: string;
+  status: 'pending' | 'resolved' | 'dismissed';
+  adminNote?: string;
+}
+

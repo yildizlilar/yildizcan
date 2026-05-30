@@ -25,9 +25,10 @@ import {
   Upload, 
   X,
   Plus,
+  HelpCircle,
 } from 'lucide-react';
 import { auth, db } from './firebase';
-import { collection, doc, setDoc, getDocs, getDoc, deleteDoc } from 'firebase/firestore';
+import { collection, doc, setDoc, getDocs, getDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
 import { 
   updateProfile,
   signInWithPopup,
@@ -37,7 +38,7 @@ import {
   signOut
 } from 'firebase/auth';
 import { INITIAL_COURSES, INITIAL_PENDINGS, INITIAL_TEACHERS, MAHMUT_TERMS, INITIAL_USER, MOCK_ACCOUNTS } from './mockData';
-import { Course, Teacher, PendingApproval, Comment } from './types';
+import { Course, Teacher, PendingApproval, Comment, Report } from './types';
 
 const calculateTagScore = (passingRate: number, attendanceStatus?: string) => {
   if (passingRate > 70) return 'Öğrenci Dostu Çan';
@@ -115,25 +116,21 @@ export default function App() {
   const [selectedPendingId, setSelectedPendingId] = useState<string>('p1');
   
   // Pending comments state
-  const [pendingComments, setPendingComments] = useState<any[]>(() => {
-    const saved = localStorage.getItem('ytu_iibf_pending_comments');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [pendingComments, setPendingComments] = useState<any[]>([]);
+
+  // Bug & Request reports state
+  const [reports, setReports] = useState<Report[]>([]);
 
   // Filter States inside Course Listing
   const [selectedDept, setSelectedDept] = useState<'iktisat' | 'isletme' | 'sbui' | 'uss' | 'ums'>('iktisat');
   const [selectedYear, setSelectedYear] = useState<number | 'sec'>(1);
 
-  // Core Data States (with LocalStorage persistence option)
-  const [courses, setCourses] = useState<Course[]>(() => {
-    const saved = localStorage.getItem('ytu_iibf_courses');
-    return saved ? JSON.parse(saved) : INITIAL_COURSES;
-  });
+  // Core Data States
+  const [courses, setCourses] = useState<Course[]>([]);
   
-  const [pendings, setPendings] = useState<PendingApproval[]>(() => {
-    const saved = localStorage.getItem('ytu_iibf_pendings');
-    return saved ? JSON.parse(saved) : INITIAL_PENDINGS;
-  });
+  const [pendings, setPendings] = useState<PendingApproval[]>([]);
+  
+  const [dataInitialized, setDataInitialized] = useState(false);
 
   // User Auth States
   // 'guest' | 'student' | 'admin'
@@ -194,20 +191,123 @@ export default function App() {
   }, [authRole]);
 
   useEffect(() => {
-    localStorage.setItem('ytu_iibf_courses', JSON.stringify(courses));
-  }, [courses]);
-
-  useEffect(() => {
-    localStorage.setItem('ytu_iibf_pendings', JSON.stringify(pendings));
-  }, [pendings]);
-
-  useEffect(() => {
     localStorage.setItem('ytu_iibf_auth', authRole);
   }, [authRole]);
 
   useEffect(() => {
-    localStorage.setItem('ytu_iibf_pending_comments', JSON.stringify(pendingComments));
-  }, [pendingComments]);
+    // Read from Firestore in real-time
+    const unsubCourses = onSnapshot(collection(db, "courses"), async (snap) => {
+      const dbCourses: Course[] = [];
+      snap.forEach(docSnap => {
+        dbCourses.push({ id: docSnap.id, ...docSnap.data() } as Course);
+      });
+      
+      // Auto-migrate if empty but old global_state has data
+      if (dbCourses.length === 0) {
+        try {
+          const oldCoursesDoc = await getDoc(doc(db, "global_state", "courses"));
+          if (oldCoursesDoc.exists() && Array.isArray(oldCoursesDoc.data().list)) {
+            const oldList = oldCoursesDoc.data().list as Course[];
+            if (oldList.length > 0) {
+              console.log("Migrating older courses into collection...", oldList.length);
+              const batchPromises = oldList.map(c => setDoc(doc(db, "courses", c.id), c));
+              await Promise.all(batchPromises);
+              return;
+            }
+          }
+        } catch (e) {
+          console.error("Auto-migration of courses failed:", e);
+        }
+      }
+      
+      setCourses(dbCourses);
+      setDataInitialized(true);
+    }, (err) => {
+      console.error("Courses snapshot error:", err);
+      setCourses([]);
+      setDataInitialized(true);
+    });
+
+    const unsubPendings = onSnapshot(collection(db, "pendings"), async (snap) => {
+      const dbPendings: any[] = [];
+      snap.forEach(docSnap => {
+        dbPendings.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      
+      // Auto-migrate if empty but old global_state has data
+      if (dbPendings.length === 0) {
+        try {
+          const oldPendingsDoc = await getDoc(doc(db, "global_state", "pendings"));
+          if (oldPendingsDoc.exists() && Array.isArray(oldPendingsDoc.data().list)) {
+            const oldList = oldPendingsDoc.data().list as any[];
+            if (oldList.length > 0) {
+              console.log("Migrating older pendings into collection...", oldList.length);
+              const batchPromises = oldList.map(p => setDoc(doc(db, "pendings", p.id), p));
+              await Promise.all(batchPromises);
+              return;
+            }
+          }
+        } catch (e) {
+          console.error("Auto-migration of pendings failed:", e);
+        }
+      }
+      
+      setPendings(dbPendings);
+    }, (err) => {
+      console.error("Pendings snapshot error:", err);
+      setPendings([]);
+    });
+
+    const unsubPendingComments = onSnapshot(collection(db, "pendingComments"), async (snap) => {
+      const dbPendingComments: any[] = [];
+      snap.forEach(docSnap => {
+        dbPendingComments.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      
+      // Auto-migrate if empty but old global_state has data
+      if (dbPendingComments.length === 0) {
+        try {
+          const oldCommentsDoc = await getDoc(doc(db, "global_state", "pendingComments"));
+          if (oldCommentsDoc.exists() && Array.isArray(oldCommentsDoc.data().list)) {
+            const oldList = oldCommentsDoc.data().list as any[];
+            if (oldList.length > 0) {
+              console.log("Migrating older pending comments into collection...", oldList.length);
+              const batchPromises = oldList.map(pc => setDoc(doc(db, "pendingComments", pc.id), pc));
+              await Promise.all(batchPromises);
+              return;
+            }
+          }
+        } catch (e) {
+          console.error("Auto-migration of pendingComments failed:", e);
+        }
+      }
+      
+      setPendingComments(dbPendingComments);
+    }, (err) => {
+      console.error("PendingComments snapshot error:", err);
+      setPendingComments([]);
+    });
+
+    const unsubReports = onSnapshot(collection(db, "reports"), (snap) => {
+      const dbReports: Report[] = [];
+      snap.forEach(docSnap => {
+        dbReports.push({ id: docSnap.id, ...docSnap.data() } as Report);
+      });
+      // Sort reports by date/id descending so newest is first
+      dbReports.sort((a, b) => b.id.localeCompare(a.id));
+      setReports(dbReports);
+    }, (err) => {
+      console.error("Reports snapshot error:", err);
+      setReports([]);
+    });
+
+    return () => {
+      unsubCourses();
+      unsubPendings();
+      unsubPendingComments();
+      unsubReports();
+    };
+  }, []);
 
   // Derived computations
   const currentCourse = useMemo(() => {
@@ -222,15 +322,36 @@ export default function App() {
     return pendings.find(p => p.id === selectedPendingId) || pendings[0];
   }, [pendings, selectedPendingId]);
 
+  // Bug & Request Report submission states
+  const [reportType, setReportType] = useState<'bug' | 'request' | 'other'>('bug');
+  const [reportTitle, setReportTitle] = useState<string>('');
+  const [reportDescription, setReportDescription] = useState<string>('');
+  const [submittingReport, setSubmittingReport] = useState<boolean>(false);
+
   // Admin Auth Dialog State
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [adminPassword, setAdminPassword] = useState('');
   
-  const [selectedAdminTab, setSelectedAdminTab] = useState<'pending' | 'direct' | 'active' | 'accounts'>('pending');
+  const [selectedAdminTab, setSelectedAdminTab] = useState<'pending' | 'direct' | 'active' | 'accounts' | 'leaderboard' | 'reports'>('pending');
   const [selectedAdminActiveCourseId, setSelectedAdminActiveCourseId] = useState<string | null>(null);
   const [activeAdminForm, setActiveAdminForm] = useState<any>(null);
   const [activeAccount, setActiveAccount] = useState<any>(null);
   const [editAccountForm, setEditAccountForm] = useState<any>(null);
+
+  const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
+  const [reportAdminNote, setReportAdminNote] = useState<string>('');
+
+  const currentAdminReport = useMemo(() => {
+    return reports.find(r => r.id === selectedReportId) || null;
+  }, [reports, selectedReportId]);
+
+  useEffect(() => {
+    if (currentAdminReport) {
+      setReportAdminNote(currentAdminReport.adminNote || '');
+    } else {
+      setReportAdminNote('');
+    }
+  }, [currentAdminReport]);
 
   useEffect(() => {
     if (activeAccount) {
@@ -240,36 +361,36 @@ export default function App() {
     }
   }, [activeAccount]);
 
-  const [deletedAccountIds, setDeletedAccountIds] = useState<string[]>(() => {
-    const saved = localStorage.getItem('ytu_iibf_deleted_accounts');
-    return saved ? JSON.parse(saved) : [];
-  });
+   const [systemAccounts, setSystemAccounts] = useState<any[]>([]);
 
-  const [systemAccounts, setSystemAccounts] = useState<any[]>([]);
-
-  const visibleAccounts = useMemo(() => {
-    return systemAccounts.filter(acc => !deletedAccountIds.includes(acc.id));
-  }, [systemAccounts, deletedAccountIds]);
+  const leaderboardRanking = useMemo(() => {
+    // Collect stats from courses mapping to uploadedBy (or usernames in systemAccounts)
+    // Actually not just systemAccounts, any user in systemAccounts counts.
+    const stats = systemAccounts.map(acc => {
+      const uploads = courses.filter(c => c.uploadedBy === acc.name || c.uploadedBy === acc.googleName).length;
+      return { ...acc, uploads };
+    });
+    
+    // Also consider users who might have uploaded but are not in systemAccounts ?
+    // No, the task says "kullanıcıların hesabına", so system accounts.
+    return stats.filter(s => s.uploads > 0).sort((a,b) => b.uploads - a.uploads);
+  }, [systemAccounts, courses]);
 
   useEffect(() => {
-    if (authRole === 'admin' && selectedAdminTab === 'accounts') {
+    if (authRole === 'admin') {
        const fetchAccounts = async () => {
          try {
            const snap = await getDocs(collection(db, "users"));
            const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-           
-           const existingEmails = new Set(users.map((u: any) => u.email));
-           const combined = [...users, ...MOCK_ACCOUNTS.filter(m => !existingEmails.has(m.email))];
-           
-           setSystemAccounts(combined);
+           setSystemAccounts(users);
          } catch(err) {
            console.error("Failed to fetch users", err);
-           setSystemAccounts(MOCK_ACCOUNTS);
+           setSystemAccounts([]);
          }
        };
        fetchAccounts();
     }
-  }, [authRole, selectedAdminTab]);
+  }, [authRole]);
   const [adminDirectForm, setAdminDirectForm] = useState({
     courseTitle: '',
     professorName: '',
@@ -291,6 +412,7 @@ export default function App() {
   const [uploadForm, setUploadForm] = useState({
     professorName: '',
     courseName: '',
+    profMainDept: 'İktisat',
     mappings: [{ dept: 'iktisat' as any, year: 1 as any }],
     term: '2025-2026 Güz',
     language: 'Türkçe',
@@ -334,43 +456,49 @@ export default function App() {
     }
 
     setSubmitting(true);
-    setTimeout(() => {
-      // Create new pending approval to go to Admin Panel
-      const newPending: PendingApproval = {
-        id: 'p_' + Date.now(),
-        courseTitle: uploadForm.courseName,
-        professorName: uploadForm.professorName,
-        profMainDept: uploadForm.profMainDept,
-        mappings: uploadForm.mappings,
-        term: uploadForm.term,
-        language: uploadForm.language as any,
-        attendanceStatus: uploadForm.attendanceStatus,
-        description: uploadForm.description,
-        date: new Date().toLocaleDateString('tr-TR'),
-        applicantName: currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : 'İsimsiz Kullanıcı',
-        applicantId: '21043' + Math.floor(Math.random() * 800 + 100),
-        fileUrl: uploadForm.fileUploaded ? uploadForm.fileData : ''
-      };
 
-      setPendings(prev => [newPending, ...prev]);
-      setSubmitting(false);
-      showToast('Çan Verisi Gönderildi! Yönetici onayından sonra listelenecektir.', 'success');
-      
-      // Auto-switch to home
-      setActiveScreen('home');
-      // Reset form
-      setUploadForm({
-        professorName: '',
-        courseName: '',
-        mappings: [{ dept: 'iktisat', year: 1 }],
-        term: '2025-2026 Güz',
-        attendanceStatus: 'none',
-        description: '',
-        fileUploaded: false,
-        fileName: '',
-    fileData: '',
+    // Create new pending approval to go to Admin Panel
+    const newPending: PendingApproval = {
+      id: 'p_' + Date.now(),
+      courseTitle: uploadForm.courseName || '',
+      professorName: uploadForm.professorName || '',
+      profMainDept: uploadForm.profMainDept || 'İktisat',
+      mappings: uploadForm.mappings || [{ dept: 'iktisat', year: 1 }],
+      term: uploadForm.term || '2025-2026 Güz',
+      language: (uploadForm.language || 'Türkçe') as any,
+      attendanceStatus: uploadForm.attendanceStatus || 'none',
+      description: uploadForm.description || '',
+      date: new Date().toLocaleDateString('tr-TR'),
+      applicantName: currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : 'İsimsiz Kullanıcı',
+      applicantId: '21043' + Math.floor(Math.random() * 800 + 100),
+      fileUrl: uploadForm.fileUploaded ? uploadForm.fileData : ''
+    };
+
+    setDoc(doc(db, "pendings", newPending.id), newPending)
+      .then(() => {
+        showToast('Çan Verisi Gönderildi! Yönetici onayından sonra listelenecektir.', 'success');
+        setSubmitting(false);
+        // Auto-switch to home
+        setActiveScreen('home');
+        // Reset form
+        setUploadForm({
+          professorName: '',
+          courseName: '',
+          profMainDept: 'İktisat',
+          mappings: [{ dept: 'iktisat', year: 1 }],
+          term: '2025-2026 Güz',
+          attendanceStatus: 'none',
+          description: '',
+          fileUploaded: false,
+          fileName: '',
+          fileData: '',
+        });
+      })
+      .catch(err => {
+        console.error("Firestore pendings save error:", err);
+        showToast('Kayıt yapılırken bir hata oluştu.', 'error');
+        setSubmitting(false);
       });
-    }, 1200);
   };
 
   // Submit comment in Detail page
@@ -391,9 +519,57 @@ export default function App() {
       text: commentText
     };
 
-    setPendingComments(prev => [...prev, newComment]);
+    setDoc(doc(db, "pendingComments", newComment.id), newComment)
+      .then(() => {
+        showToast('Açıklama incelemeye alındı, yönetici onayından sonra yayınlanacaktır.', 'success');
+      })
+      .catch(err => {
+        console.error("Firestore pendingComments save error:", err);
+      });
+
     setCommentText('');
-    showToast('Açıklama incelemeye alındı, yönetici onayından sonra yayınlanacaktır.', 'success');
+  };
+
+  // Submit report handler
+  const handleSubmitReport = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reportTitle.trim() || !reportDescription.trim()) {
+      showToast('Lütfen tüm alanları doldurun.', 'error');
+      return;
+    }
+
+    if (!currentUser) {
+      showToast('Rapor gönderebilmek için giriş yapmalısınız.', 'error');
+      return;
+    }
+
+    setSubmittingReport(true);
+
+    const newReport: Report = {
+      id: 'rep_' + Date.now(),
+      userId: currentUser.uid,
+      userEmail: currentUser.email || 'bilinmiyor@ytu.edu.tr',
+      userName: currentUser.displayName || 'İsimsiz Kullanıcı',
+      type: reportType,
+      title: reportTitle.trim(),
+      description: reportDescription.trim(),
+      date: new Date().toLocaleDateString('tr-TR'),
+      status: 'pending' as const
+    };
+
+    setDoc(doc(db, "reports", newReport.id), newReport)
+      .then(() => {
+        showToast('Rapor başarıyla iletildi. İnceleme sonrası hesabınızdan güncellemeleri görebilirsiniz.', 'success');
+        setReportTitle('');
+        setReportDescription('');
+        setReportType('bug');
+        setSubmittingReport(false);
+      })
+      .catch((err) => {
+        console.error("Error saving report to Firestore:", err);
+        showToast('Rapor gönderilirken hata oluştu.', 'error');
+        setSubmittingReport(false);
+      });
   };
 
   // Admin processes Approval
@@ -401,7 +577,7 @@ export default function App() {
     const item = pendings.find(p => p.id === pendingId);
     if (!item) return;
 
-        // Convert into active course list
+    // Convert into active course list
     // Calculation of passage rate
     const gd = item.gradesDistribution || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0,F0:0};
     if (item.attendanceStatus === 'none' || item.attendanceStatus === 'not_failing') gd.F0 = 0;
@@ -409,37 +585,43 @@ export default function App() {
     const all = passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
     const calculatedPassingRate = all > 0 ? (passed / all) * 100 : 0;
     
-    
     const newCourse: Course = {
       id: 'C_' + Date.now(),
       code: item.courseCode || 'BİLİNMİYOR',
-      title: item.courseTitle,
+      title: item.courseTitle || 'Adsız Ders',
       department: item.mappings?.[0]?.dept || 'iktisat',
       year: item.mappings?.[0]?.year || 1,
-      mappings: item.mappings,
+      mappings: item.mappings || [{ dept: 'iktisat', year: 1 }],
       
-      averageBell: item.average || 50,
-      stdDev: item.stdDev,
-      bellType: item.bellType as any,
-      gradeThresholds: item.gradeThresholds,
+      averageBell: item.average !== undefined && item.average !== null ? item.average : 55,
+      stdDev: item.stdDev !== undefined && item.stdDev !== null ? item.stdDev : 10,
+      bellType: (item.bellType || 'mutlak') as any,
+      gradeThresholds: item.gradeThresholds || {AA:85, BA:75, BB:65, CB:55, CC:45, DC:40, DD:30, FD:20, FF:0},
       professorCount: 1,
-      professorName: item.professorName,
-      profMainDept: item.profMainDept,
-      term: item.term,
-      language: item.language,
-      attendanceStatus: item.attendanceStatus,
-      description: item.description,
+      professorName: item.professorName || 'Bilinmiyor',
+      profMainDept: item.profMainDept || 'İktisat',
+      term: item.term || '2025-2026 Güz',
+      language: item.language || 'Türkçe',
+      attendanceStatus: item.attendanceStatus || 'none',
+      description: item.description || '',
       gradesDistribution: gd,
       totalStudents: all,
       passingRate: calculatedPassingRate,
-      uploadedBy: item.applicantName,
-      uploadedDate: item.date,
+      uploadedBy: item.applicantName || 'Sistem',
+      uploadedDate: item.date || new Date().toLocaleDateString('tr-TR'),
       comments: [],
-      fileUrl: item.fileUrl
+      fileUrl: item.fileUrl || ''
     };
 
-    setCourses(prev => [newCourse, ...prev]);
-    setPendings(prev => prev.filter(p => p.id !== pendingId));
+    setDoc(doc(db, "courses", newCourse.id), newCourse)
+      .then(() => {
+        deleteDoc(doc(db, "pendings", pendingId)).catch(err => {
+          console.error("Firestore delete pending after approval error:", err);
+        });
+      })
+      .catch(err => {
+        console.error("Firestore approve save error:", err);
+      });
     
     // Select next pending if any remains
     const remaining = pendings.filter(p => p.id !== pendingId);
@@ -451,7 +633,10 @@ export default function App() {
   };
 
   const handleRejectPending = (pendingId: string) => {
-    setPendings(prev => prev.filter(p => p.id !== pendingId));
+    deleteDoc(doc(db, "pendings", pendingId)).catch(err => {
+      console.error("Firestore reject save error:", err);
+    });
+
     const remaining = pendings.filter(p => p.id !== pendingId);
     if (remaining.length > 0) {
       setSelectedPendingId(remaining[0].id);
@@ -492,13 +677,6 @@ export default function App() {
       setActiveAccount(null);
       setEditAccountForm(null);
 
-      // Blacklist deleted IDs so they never reappear
-      setDeletedAccountIds(prev => {
-        const next = [...prev, targetId];
-        localStorage.setItem('ytu_iibf_deleted_accounts', JSON.stringify(next));
-        return next;
-      });
-
       const docRef = doc(db, "users", targetId);
       await deleteDoc(docRef);
 
@@ -516,49 +694,52 @@ export default function App() {
       return;
     }
 
-    setCourses(prev => prev.map(c => {
-      if (c.id === selectedAdminActiveCourseId) {
-        const gd = activeAdminForm.gradesDistribution as any;
-        if (activeAdminForm.attendanceStatus === 'none' || activeAdminForm.attendanceStatus === 'not_failing') gd.F0 = 0;
-        const passed = (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
-        const all = passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
-        const calculatedPassingRate = all > 0 ? (passed / all) * 100 : 0;
-        
-        
-        const firstMapping = activeAdminForm.mappings[0];
-        
-        return {
-          ...c,
-          title: activeAdminForm.courseTitle,
-          professorName: activeAdminForm.professorName,
-          code: activeAdminForm.courseCode || 'BİLİNMİYOR',
-          term: activeAdminForm.term,
-          language: activeAdminForm.language,
-          averageBell: activeAdminForm.averageBell,
-          stdDev: activeAdminForm.stdDev,
-          profMainDept: activeAdminForm.profMainDept,
-          bellType: activeAdminForm.bellType,
-          attendanceStatus: activeAdminForm.attendanceStatus,
-          gradeThresholds: activeAdminForm.gradeThresholds,
-          gradesDistribution: activeAdminForm.gradesDistribution,
-          description: activeAdminForm.description,
-          mappings: activeAdminForm.mappings,
-          department: firstMapping.dept,
-          year: firstMapping.year,
-          
-          totalStudents: all,
-          passingRate: calculatedPassingRate
-        };
-      }
-      return c;
-    }));
+    const targetCourse = courses.find(c => c.id === selectedAdminActiveCourseId);
+    if (!targetCourse) return;
+
+    const gd = activeAdminForm.gradesDistribution as any;
+    if (activeAdminForm.attendanceStatus === 'none' || activeAdminForm.attendanceStatus === 'not_failing') gd.F0 = 0;
+    const passed = (gd.AA||0) + (gd.BA||0) + (gd.BB||0) + (gd.CB||0) + (gd.CC||0) + (gd.DC||0);
+    const all = passed + (gd.DD||0) + (gd.FD||0) + (gd.FF||0) + (gd.F0||0);
+    const calculatedPassingRate = all > 0 ? (passed / all) * 100 : 0;
+    
+    const firstMapping = activeAdminForm.mappings[0];
+    
+    const editedCourse: Course = {
+      ...targetCourse,
+      title: activeAdminForm.courseTitle,
+      professorName: activeAdminForm.professorName,
+      code: activeAdminForm.courseCode || 'BİLİNMİYOR',
+      term: activeAdminForm.term,
+      language: activeAdminForm.language,
+      averageBell: activeAdminForm.averageBell,
+      stdDev: activeAdminForm.stdDev,
+      profMainDept: activeAdminForm.profMainDept,
+      bellType: activeAdminForm.bellType,
+      attendanceStatus: activeAdminForm.attendanceStatus,
+      gradeThresholds: activeAdminForm.gradeThresholds,
+      gradesDistribution: activeAdminForm.gradesDistribution,
+      description: activeAdminForm.description,
+      mappings: activeAdminForm.mappings,
+      department: firstMapping.dept,
+      year: firstMapping.year,
+      
+      totalStudents: all,
+      passingRate: calculatedPassingRate
+    };
+
+    setDoc(doc(db, "courses", selectedAdminActiveCourseId), editedCourse).catch(err => {
+      console.error("Firestore update active course error:", err);
+    });
     
     showToast('Onaylı çan verisi başarıyla güncellendi!', 'success');
   };
 
   const handleActiveDeleteCourse = () => {
     if (!selectedAdminActiveCourseId) return;
-    setCourses(prev => prev.filter(c => c.id !== selectedAdminActiveCourseId));
+    deleteDoc(doc(db, "courses", selectedAdminActiveCourseId)).catch(err => {
+      console.error("Firestore delete active course error:", err);
+    });
     setSelectedAdminActiveCourseId(null);
     setActiveAdminForm(null);
     showToast('Ders kalıcı olarak silindi!', 'success');
@@ -607,7 +788,9 @@ export default function App() {
       fileUrl: ''
     };
 
-    setCourses(prev => [newCourse, ...prev]);
+    setDoc(doc(db, "courses", newCourse.id), newCourse).catch(err => {
+      console.error("Firestore direct add course error:", err);
+    });
     
     // Reset form
     setAdminDirectForm({
@@ -917,6 +1100,17 @@ export default function App() {
          </div>
        </div>
      );
+  }
+
+  if (!dataInitialized) {
+    return (
+      <div className="min-h-screen bg-background-gray flex items-center justify-center p-4 selection:bg-brand-orange/30">
+        <div className="flex flex-col items-center gap-4">
+          <School size={48} className="text-secondary animate-pulse" />
+          <h1 className="text-2xl font-display font-extrabold text-primary animate-pulse">Sistem Yükleniyor...</h1>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -1235,43 +1429,99 @@ export default function App() {
         {activeScreen === 'home' && (
           <div className="animate-fade-in space-y-8">
             
-            {/* Hero Card */}
-            <section className="hero-mesh rounded-2xl p-8 md:p-12 border border-gray-100 shadow-md relative overflow-hidden">
-              <div className="relative z-10 max-w-3xl space-y-6">
-                <span className="inline-block px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-bold uppercase tracking-widest leading-none">
-                  Yıldız Teknik Üniversitesi
-                </span>
-                <h2 className="font-display font-extrabold text-[#00193c] text-3xl md:text-5xl tracking-tight leading-tight">
-                  İİBF Çan Paylaşım Platformu
-                </h2>
-                <p className="text-base text-text-muted md:text-lg leading-relaxed max-w-2xl">
-                  İktisadi ve İdari Bilimler Fakültesi öğrencilerine özel olarak geliştirilmiş bu sitede daha önceden aldığınız derslerin çan eğrisi verilerini paylaşabilir, geçmiş dönem istatistiklerini inceleyebilir ve akademik yolculuğunuzu minimum hasarla atlatabilirsiniz.
-                </p>
-                
-                <div className="pt-2 flex flex-col sm:flex-row gap-4 flex-wrap">
-                  <button 
-                    onClick={() => setActiveScreen('upload')}
-                    className="bg-primary hover:bg-secondary active:scale-[0.98] transition-all text-white font-bold text-sm px-6 py-4 rounded-xl shadow-lg flex items-center justify-center gap-2 leading-none"
-                  >
-                    <PlusCircle size={18} />
-                    Çan Eğrisi Paylaş
-                  </button>
-                  <button 
-                    onClick={() => { setSelectedDept('iktisat'); setActiveScreen('courses'); }}
-                    className="bg-white border border-gray-200 hover:border-primary active:scale-[0.98] transition-all text-primary font-bold text-sm px-6 py-4 rounded-xl shadow flex items-center justify-center gap-2 leading-none"
-                  >
-                    <BookOpen size={18} />
-                    Derse Göre Listele
-                  </button>
+            {/* Hero Card & Info section */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+              {/* Main Banner */}
+              <section className="lg:col-span-7 hero-mesh rounded-2xl p-8 md:p-10 border border-gray-100 shadow-md relative overflow-hidden flex flex-col justify-between">
+                <div className="relative z-10 space-y-6">
+                  <span className="inline-block px-3 py-1 rounded-full bg-primary/10 text-primary text-xs font-bold uppercase tracking-widest leading-none">
+                    Yıldız Teknik Üniversitesi
+                  </span>
+                  <h2 className="font-display font-extrabold text-[#00193c] text-3xl md:text-4xl tracking-tight leading-tight">
+                    İİBF Çan Paylaşım Platformu
+                  </h2>
+                  <p className="text-sm text-text-muted md:text-base leading-relaxed max-w-2xl">
+                    İktisadi ve İdari Bilimler Fakültesi öğrencilerine özel olarak geliştirilmiş bu platformda daha önceden aldığınız derslerin çan eğrisi verilerini paylaşabilir, geçmiş dönem istatistiklerini inceleyebilir ve akademik yolculuğunuzu minimum hasarla atlatabilirsiniz.
+                  </p>
                   
+                  <div className="pt-2 flex flex-col sm:flex-row gap-4 flex-wrap">
+                    <button 
+                      onClick={() => setActiveScreen('upload')}
+                      className="bg-primary hover:bg-secondary active:scale-[0.98] transition-all text-white font-bold text-sm px-6 py-4 rounded-xl shadow-lg flex items-center justify-center gap-2 leading-none"
+                    >
+                      <PlusCircle size={18} />
+                      Çan Eğrisi Paylaş
+                    </button>
+                    <button 
+                      onClick={() => { setSelectedDept('iktisat'); setActiveScreen('courses'); }}
+                      className="bg-white border border-gray-200 hover:border-primary active:scale-[0.98] transition-all text-primary font-bold text-sm px-6 py-4 rounded-xl shadow flex items-center justify-center gap-2 leading-none"
+                    >
+                      <BookOpen size={18} />
+                      Derse Göre Listele
+                    </button>
+                  </div>
+                </div>
+                {/* Decorative Background Icon */}
+                <div className="absolute right-0 bottom-0 opacity-5 pointer-events-none hidden lg:block transform translate-x-12 translate-y-12 shrink-0">
+                  <School size={220} className="stroke-[1.5] text-primary" />
+                </div>
+              </section>
+
+              {/* Hakkında & Kullanım Talimatları */}
+              <div className="lg:col-span-5 bg-white rounded-2xl p-8 border border-gray-200 shadow-sm flex flex-col justify-between space-y-4 text-left relative overflow-hidden">
+                <div className="space-y-4 relative z-10">
+                  <div className="flex items-center gap-2 text-primary font-display font-extrabold text-lg uppercase tracking-tight pb-1 border-b border-gray-100">
+                    <HelpCircle size={22} className="stroke-[2.5] text-secondary shrink-0" />
+                    <span>Hakkında</span>
+                  </div>
+                  <p className="text-xs text-text-muted leading-relaxed">
+                    Yıldız Çan, Mahmut Bilgetürk hocamızın Proje Yönetimi ve Organizasyon dersi için hazırlanmış bir proje olup Yıldız Teknik Üniversitesi İktisadi ve İdari Bilimler Fakültesinde eğitim gören sıra arkadaşlarımızın ders seçerken yaşayacağı asimetrik bilgi problemini minimuma indirmeyi amaçlamaktadır.
+                  </p>
+                  
+                  <div className="space-y-3 pt-1">
+                    <div className="flex gap-2.5 items-start">
+                      <div className="p-1 rounded bg-secondary/10 text-secondary mt-0.5 shrink-0">
+                        <Check size={12} className="stroke-[3]" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-[#00193c]">Kredisi aynı, eziyeti farklı</h4>
+                        <p className="text-[11px] text-text-muted">Tüm seçmeliler 3 kredi aslında. Az zahmetle dersi geçmek var, paralanıp geçmek var. Seçim senin. Senin en doğru kararı vermen için buradayız.</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2.5 items-start">
+                      <div className="p-1 rounded bg-secondary/10 text-secondary mt-0.5 shrink-0">
+                        <Check size={12} className="stroke-[3]" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-[#00193c]">Hocaları kıyasla</h4>
+                        <p className="text-[11px] text-text-muted">Hangi hoca kıt notlu, hangi hocanın çanı daha iyi, hangi hoca yoklama almıyor, hepsi burada!</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2.5 items-start">
+                      <div className="p-1 rounded bg-secondary/10 text-secondary mt-0.5 shrink-0">
+                        <Check size={12} className="stroke-[3]" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-[#00193c]">Sadece zorunlu dersler değil, tüm dersler</h4>
+                        <p className="text-[11px] text-text-muted">Yıldız Çan'da sadece bölümünüzün zorunlu dersleri olmaz. Mesleki Seçmeli, ÜMS ve Sosyal Seçmeli dersler de bu sistemde bulunmakta.</p>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2.5 items-start">
+                      <div className="p-1 rounded bg-secondary/10 text-secondary mt-0.5 shrink-0">
+                        <Check size={12} className="stroke-[3]" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-bold text-[#00193c]">Sen de çan ekle!</h4>
+                        <p className="text-[11px] text-text-muted">Eklediğin çanlarla sıra arkadaşlarımızın akademik hayatındaki yükü hafifletme görevinde bize yardımcı ol.</p>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
-              
-              {/* Decorative Background Icon */}
-              <div className="absolute right-0 bottom-0 opacity-5 pointer-events-none hidden lg:block transform translate-x-12 translate-y-12 shrink-0">
-                <School size={300} className="stroke-[1.5] text-primary" />
-              </div>
-            </section>
+            </div>
 
             {/* Quick Stats Banner */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -1610,9 +1860,6 @@ export default function App() {
 
               <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 bg-white/45 p-6 rounded-2xl border border-gray-200">
                 <div className="space-y-2">
-                  <span className="inline-block px-3 py-1 rounded-lg bg-emerald-500/10 text-emerald-600 font-bold text-xs uppercase tracking-wider">
-                    {currentCourse.department.toUpperCase()} BÖLÜMÜ
-                  </span>
                   <h2 className="font-display font-extrabold text-2xl md:text-4xl text-[#00193c] tracking-tight">
                     {currentCourse.title}
                   </h2>
@@ -1892,13 +2139,13 @@ export default function App() {
                     </select>
                   </div>
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">PROFESÖR ADI</label>
+                    <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">ÖĞRETİM ÜYESİ</label>
                     <input 
                       type="text"
                       required
                       value={uploadForm.professorName}
                       onChange={(e) => setUploadForm(p => ({ ...p, professorName: e.target.value }))}
-                      placeholder="Örn: Dr. Ahmet Yılmaz"
+                      placeholder="Örn: Mahmut Bilgetürk"
                       className="bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm focus:ring-1 focus:ring-primary focus:border-primary transition-all outline-none"
                     />
                   </div>
@@ -2063,6 +2310,12 @@ export default function App() {
                   <label className="text-xs font-bold text-primary uppercase tracking-wider ml-1">
                     ÇAN EĞRİSİ PDF DOSYASI (MAX: 300 KB)
                   </label>
+                  <div className="bg-yellow-50/80 border border-yellow-200/60 rounded-xl p-3 flex items-start gap-2 shadow-sm my-1">
+                    <span className="text-base leading-none">💡</span>
+                    <p className="text-xs font-medium text-yellow-800/90 leading-relaxed">
+                      <strong>İpucu:</strong> OBS'den ilgili not tablosunun sayfasına girip <strong>Yazdır (Print)</strong> tuşuna tıklayarak ve hedefi <strong>"PDF olarak kaydet"</strong> seçerek kolayca PDF dosyası oluşturabilirsiniz.
+                    </p>
+                  </div>
                   
                   <div className="mt-1 relative flex justify-center px-6 pt-5 pb-6 border-2 border-dashed rounded-2xl cursor-pointer transition-all border-gray-300 bg-gray-50 hover:border-primary hover:bg-gray-100 group">
                     <input 
@@ -2162,11 +2415,15 @@ export default function App() {
               
               {/* Left sidebar list: Pending submissions list */}
               <section className="lg:col-span-4 space-y-4">
-                <div className="bg-gray-100 p-1 flex rounded-xl border border-gray-200 mb-4 flex-wrap">
-                  <button onClick={() => setSelectedAdminTab('pending')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'pending' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Onay Bekleyenler</button>
-                  <button onClick={() => setSelectedAdminTab('direct')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'direct' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Doğrudan Veri Ekle</button>
-                  <button onClick={() => setSelectedAdminTab('active')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'active' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Onaylanmışları Düzenle</button>
-                  <button onClick={() => setSelectedAdminTab('accounts')} className={`flex-1 py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'accounts' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Hesap Listesi</button>
+                <div className="bg-gray-100 p-1 flex rounded-xl border border-gray-200 mb-4 flex-wrap gap-1">
+                  <button onClick={() => setSelectedAdminTab('pending')} className={`flex-1 min-w-[80px] py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'pending' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Onay Bekleyenler</button>
+                  <button onClick={() => setSelectedAdminTab('direct')} className={`flex-1 min-w-[80px] py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'direct' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Doğrudan Veri Ekle</button>
+                  <button onClick={() => setSelectedAdminTab('active')} className={`flex-1 min-w-[80px] py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'active' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Onaylanmışları Düzenle</button>
+                  <button onClick={() => setSelectedAdminTab('accounts')} className={`flex-1 min-w-[80px] py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'accounts' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Hesap Listesi</button>
+                  <button onClick={() => setSelectedAdminTab('leaderboard')} className={`flex-1 min-w-[80px] py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'leaderboard' ? 'bg-white text-primary shadow' : 'text-gray-500 hover:bg-gray-200/50'}`}>Sıralama</button>
+                  <button onClick={() => setSelectedAdminTab('reports')} className={`flex-1 min-w-[80px] py-2 px-1 text-[10px] font-bold rounded-lg transition-colors ${selectedAdminTab === 'reports' ? 'bg-white text-primary shadow' : 'text-gray-1000 hover:bg-gray-200/50 bg-[#00193c]/5'}`}>
+                    Raporlar / Destek ({reports.filter(r => r.status === 'pending').length})
+                  </button>
                 </div>
 
                 {selectedAdminTab === 'active' && (
@@ -2285,15 +2542,29 @@ export default function App() {
                             <div className="flex gap-2 justify-end mt-2">
                               <button 
                                 onClick={() => {
-                                  setCourses(prev => prev.map(c => c.id === pc.courseDataId ? { ...c, comments: [...c.comments, pc] } : c));
-                                  setPendingComments(prev => prev.filter(c => c.id !== pc.id));
+                                  const targetC = courses.find(c => c.id === pc.courseDataId);
+                                  if (targetC) {
+                                    const updatedComments = [...(targetC.comments || []), pc];
+                                    Promise.all([
+                                      setDoc(doc(db, "courses", pc.courseDataId), { ...targetC, comments: updatedComments }),
+                                      deleteDoc(doc(db, "pendingComments", pc.id))
+                                    ]).catch(err => {
+                                      console.error("Firestore approve comment error:", err);
+                                    });
+                                  } else {
+                                    deleteDoc(doc(db, "pendingComments", pc.id)).catch(err => {
+                                      console.error("Firestore remove orphaned comment error:", err);
+                                    });
+                                  }
                                   showToast('Açıklama onaylandı ve yayınlandı.', 'success');
                                 }}
                                 className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold px-3 py-1.5 rounded-lg flex-1 transition-colors"
                               >Onayla</button>
                               <button 
                                 onClick={() => {
-                                  setPendingComments(prev => prev.filter(c => c.id !== pc.id));
+                                  deleteDoc(doc(db, "pendingComments", pc.id)).catch(err => {
+                                    console.error("Firestore reject comment error:", err);
+                                  });
                                   showToast('Açıklama reddedildi.', 'info');
                                 }}
                                 className="text-xs bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold px-3 py-1.5 rounded-lg flex-1 transition-colors"
@@ -2317,11 +2588,11 @@ export default function App() {
                          Sistemdeki Hesaplar
                        </h3>
                        <span className="bg-primary text-white text-[10px] font-extrabold px-3 py-1 rounded-full">
-                         {visibleAccounts.length} Hesap
+                         {systemAccounts.length} Hesap
                        </span>
                     </div>
                     <div className="space-y-3 max-h-[calc(100vh-250px)] overflow-y-auto pr-1">
-                      {visibleAccounts.map(acc => (
+                      {systemAccounts.map(acc => (
                         <div
                           key={acc.id}
                           onClick={() => setActiveAccount(acc)}
@@ -2346,9 +2617,252 @@ export default function App() {
                     </div>
                   </>
                 )}
+                {selectedAdminTab === 'leaderboard' && (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 text-center">
+                    <h3 className="font-display font-extrabold text-sm text-primary uppercase tracking-wider mb-2">Çan Yükleme Sıralaması</h3>
+                    <p className="text-xs text-text-muted">Sisteme en çok çan ekleyen emektar kullanıcılarımız listelenmektedir.</p>
+                  </div>
+                )}
+                {selectedAdminTab === 'reports' && (
+                  <>
+                    <div className="flex items-center justify-between mb-2">
+                       <h3 className="font-display font-extrabold text-sm text-primary uppercase tracking-wider">
+                         Hata ve İstekler
+                       </h3>
+                       <span className="bg-[#00193c] text-white text-[10px] font-extrabold px-3 py-1 rounded-full">
+                         {reports.length} Rapor
+                       </span>
+                    </div>
+                    <div className="space-y-3 max-h-[calc(100vh-250px)] overflow-y-auto pr-1">
+                      {reports.length > 0 ? (
+                        reports.map(rep => (
+                          <div
+                            key={rep.id}
+                            onClick={() => setSelectedReportId(rep.id)}
+                            className={`group p-4 bg-white rounded-xl shadow-sm cursor-pointer transition-all hover:shadow-md border-2 text-left space-y-2 ${
+                              selectedReportId === rep.id 
+                                  ? 'border-primary bg-primary/2' 
+                                  : 'border-gray-100 hover:border-gray-200'
+                            }`}
+                          >
+                            <div className="flex flex-col gap-1">
+                              <div className="flex justify-between items-start gap-1">
+                                <span className={`text-[9px] font-extrabold uppercase px-2 py-0.5 rounded-full ${
+                                  rep.type === 'bug' 
+                                    ? 'bg-rose-50 text-rose-700 border border-rose-200' 
+                                    : 'bg-amber-50 text-amber-700 border border-amber-200'
+                                }`}>
+                                  {rep.type === 'bug' ? 'Hata / Bug' : 'İstek / Öneri'}
+                                </span>
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                  rep.status === 'resolved'
+                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                    : rep.status === 'dismissed'
+                                    ? 'bg-gray-100 text-gray-600 border border-gray-200'
+                                    : 'bg-primary/5 text-primary border border-primary/20'
+                                }`}>
+                                  {rep.status === 'resolved' ? 'Çözüldü' : rep.status === 'dismissed' ? 'Kapatıldı' : 'Bekliyor'}
+                                </span>
+                              </div>
+                              <span className="font-bold text-sm text-primary line-clamp-1">{rep.title}</span>
+                              <p className="text-[10px] text-text-muted mt-1">
+                                Gönderen: {rep.userName}
+                              </p>
+                              <span className="text-[9px] text-text-muted">{rep.date}</span>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="bg-white p-8 rounded-xl border border-gray-100 text-center space-y-2">
+                          <CheckCircle2 className="text-emerald-500 mx-auto" size={32} />
+                          <p className="text-xs font-bold text-primary">Kayıtlı Rapor Bulunmamaktadır</p>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
               </section>
               {/* Right main display page: Details editor and validations */}
               <section className="lg:col-span-8">
+                {selectedAdminTab === 'reports' && !selectedReportId && (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-12 text-center animate-fade-in flex flex-col items-center mt-4">
+                    <AlertTriangle size={48} className="text-gray-300 mb-4" />
+                    <h3 className="text-sm font-bold text-text-muted">Ayrıntıları görmek ve yanıtlamak için sol listeden bir rapor seçin.</h3>
+                  </div>
+                )}
+
+                {selectedAdminTab === 'reports' && currentAdminReport && (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-xl overflow-hidden animate-scale-up text-left">
+                    <div className="p-6 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+                      <div>
+                        <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full ${
+                          currentAdminReport.type === 'bug' 
+                            ? 'bg-rose-50 text-rose-700 border border-rose-200' 
+                            : 'bg-amber-50 text-amber-700 border border-amber-200'
+                        }`}>
+                          {currentAdminReport.type === 'bug' ? 'Hata / Bug Raporu' : 'İstek / Öneri Raporu'}
+                        </span>
+                        <h2 className="font-display font-extrabold text-xl text-primary mt-2">{currentAdminReport.title}</h2>
+                      </div>
+                      <span className="text-xs font-bold text-text-muted shrink-0 bg-white border border-gray-100 px-3 py-1 rounded-lg shadow-sm">
+                        {currentAdminReport.date}
+                      </span>
+                    </div>
+
+                    <div className="p-6 space-y-6">
+                      {/* Submitter Details */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 bg-gray-50/50 border border-gray-100 rounded-xl text-xs">
+                        <div>
+                          <p className="text-[10px] font-bold text-text-muted uppercase">Gönderen Kullanıcı</p>
+                          <p className="font-extrabold text-primary mt-1">{currentAdminReport.userName}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-bold text-text-muted uppercase">E-Posta Adresi</p>
+                          <p className="font-extrabold text-primary mt-1">{currentAdminReport.userEmail}</p>
+                        </div>
+                      </div>
+
+                      {/* Description */}
+                      <div className="space-y-2">
+                        <h4 className="text-xs font-bold text-text-muted uppercase">Rapor İçeriği / Detaylar</h4>
+                        <div className="p-4 bg-gray-50 border border-gray-100 rounded-xl text-sm text-gray-700 leading-relaxed whitespace-pre-line">
+                          {currentAdminReport.description}
+                        </div>
+                      </div>
+
+                      {/* Admin Response Details */}
+                      <div className="space-y-4 pt-4 border-t border-gray-100">
+                        <h3 className="font-display font-extrabold text-primary text-base">Rapor Durumu ve Cevap</h3>
+
+                        {/* Status Select Buttons */}
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold text-text-muted uppercase">İşlem Durumu</label>
+                          <div className="flex flex-wrap gap-2 mt-1">
+                            {[
+                              { label: 'İnceleme Bekliyor', value: 'pending' as const, color: 'border-primary/20 text-primary bg-primary/2' },
+                              { label: 'Çözüldü', value: 'resolved' as const, color: 'border-emerald-300 text-emerald-700 bg-emerald-50' },
+                              { label: 'Kapatıldı / Reddedildi', value: 'dismissed' as const, color: 'border-gray-200 text-gray-600 bg-gray-50' }
+                            ].map((st) => (
+                              <button
+                                key={st.value}
+                                type="button"
+                                onClick={() => {
+                                  setDoc(doc(db, "reports", currentAdminReport.id), { ...currentAdminReport, status: st.value })
+                                    .then(() => {
+                                      showToast('Rapor durumu güncellendi.', 'success');
+                                    })
+                                    .catch(e => console.error("Error setting report state:", e));
+                                }}
+                                className={`py-1.5 px-3 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                                  currentAdminReport.status === st.value
+                                    ? `ring-1 ring-primary ${st.color} font-extrabold shadow-sm`
+                                    : 'bg-white border-gray-200 text-primary hover:bg-gray-50'
+                                }`}
+                              >
+                                {st.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Admin note reply text */}
+                        <div className="space-y-1 flex flex-col">
+                          <label className="text-[10px] font-bold text-text-muted uppercase">Yönetici Notu / Yanıt</label>
+                          <textarea
+                            rows={3}
+                            value={reportAdminNote}
+                            onChange={(e) => setReportAdminNote(e.target.value)}
+                            placeholder="Kullanıcıya iletilecek çözüm açıklamasını yazın..."
+                            className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-primary transition-all outline-none resize-none"
+                          />
+                        </div>
+
+                        {/* Action buttons */}
+                        <div className="flex gap-2 justify-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              deleteDoc(doc(db, "reports", currentAdminReport.id))
+                                .then(() => {
+                                  setSelectedReportId(null);
+                                  showToast('Rapor başarıyla silindi.', 'success');
+                                })
+                                .catch(err => {
+                                  console.error("Error deleting report:", err);
+                                  showToast('Rapor silinemedi.', 'error');
+                                });
+                            }}
+                            className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                          >
+                            Raporu Tamamen Sil
+                          </button>
+                          
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDoc(doc(db, "reports", currentAdminReport.id), { ...currentAdminReport, adminNote: reportAdminNote })
+                                .then(() => {
+                                  showToast('Yönetici notu kaydedildi ve kullanıcıya anında ulaştırıldı.', 'success');
+                                })
+                                .catch(err => {
+                                  console.error("Error setting adminNote in Firestore:", err);
+                                  showToast('Not kaydedilemedi.', 'error');
+                                });
+                            }}
+                            className="bg-primary hover:bg-[#00112a] text-white font-bold text-xs px-5 py-2' rounded-xl transition-all shadow cursor-pointer"
+                          >
+                            Yanıtı Kaydet
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {selectedAdminTab === 'leaderboard' && (
+                  <div className="bg-white rounded-2xl border border-gray-200 shadow-xl overflow-hidden animate-scale-up">
+                    <div className="p-6 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+                      <h2 className="font-display font-extrabold text-xl text-primary">Sıralama (Leaderboard)</h2>
+                      <span className="text-xs font-bold bg-primary/10 text-primary px-3 py-1 rounded-full">{leaderboardRanking.length} Kullanıcı Listeleniyor</span>
+                    </div>
+                    <div className="p-6">
+                      <div className="space-y-3">
+                        {leaderboardRanking.length === 0 ? (
+                          <p className="text-center text-sm text-text-muted py-8">Henüz sıralamada kimse yok.</p>
+                        ) : (
+                          leaderboardRanking.map((user, index) => {
+                            let badge = null;
+                            if (index === 0) badge = <span className="bg-slate-200 text-slate-800 text-[10px] font-extrabold px-2 py-1 rounded-md ml-2 border border-slate-300">Platin #1 Emektar</span>;
+                            else if (index === 1) badge = <span className="bg-amber-100 text-amber-700 text-[10px] font-extrabold px-2 py-1 rounded-md ml-2 border border-amber-200">Altın #2 Emektar</span>;
+                            else if (index === 2) badge = <span className="bg-gray-100 text-gray-700 text-[10px] font-extrabold px-2 py-1 rounded-md ml-2 border border-gray-200">Gümüş #3 Emektar</span>;
+                            else if (index === 3) badge = <span className="bg-orange-100 text-orange-800 text-[10px] font-extrabold px-2 py-1 rounded-md ml-2 border border-orange-200">Bronz #4 Emektar</span>;
+
+                            return (
+                              <div key={user.id || index} className="flex items-center justify-between p-4 bg-white border border-gray-100 hover:border-gray-300 transition-all rounded-xl shadow-sm">
+                                <div className="flex items-center gap-4">
+                                  <div className="w-8 h-8 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm shrink-0">
+                                    {index + 1}
+                                  </div>
+                                  <div>
+                                    <div className="flex items-center">
+                                      <h4 className="font-bold text-sm text-[#00193c]">{user.googleName || 'Anonim Gönderici'}</h4>
+                                      {badge}
+                                    </div>
+                                    <p className="text-[11px] text-text-muted mt-0.5">@{user.name}</p>
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <span className="font-extrabold text-lg text-primary">{user.uploads}</span>
+                                  <p className="text-[10px] font-semibold text-text-muted">Çan Yüklemesi</p>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {selectedAdminTab === 'accounts' && activeAccount && editAccountForm && (() => {
                   const userCourses = courses.filter(c => c.uploadedBy === activeAccount.name);
                   const total = userCourses.length;
@@ -2534,11 +3048,6 @@ export default function App() {
                               <p className="text-xs text-text-muted">Resmi Döküm Belgesi Yüklenmedi</p>
                             </div>
                           )}
-                          <div className="absolute inset-0 bg-primary/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-                            <span className="bg-white px-4 py-2 rounded-xl text-xs font-bold shadow-lg text-primary flex items-center gap-1.5">
-                              Entegre Görüntü Islak Kaşe Teyitli
-                            </span>
-                          </div>
                         </div>
                       </div>
 
@@ -2550,6 +3059,66 @@ export default function App() {
                             DÜZENLENEBİLİR
                           </span>
                         </span>
+
+                        {/* Threshold distribution count fields */}
+                        <div className="pt-2">
+                          <label className="text-[10px] font-bold text-primary uppercase tracking-wider block mb-2">
+                            Çan Notları Alt Sınırları & Harf Sayıları
+                          </label>
+                          <div className="grid grid-cols-5 gap-1.5">
+                            {['AA', 'BA', 'BB', 'CB', 'CC', 'DC', 'DD', 'FD', 'FF', 'F0'].map((grade) => (
+                              <div key={grade} className="bg-gray-50 p-1.5 border border-gray-200 rounded text-center mb-2">
+                                <span className="text-[9px] font-extrabold text-[#3e5e95] block leading-none mb-1">{grade}</span>
+                                {grade !== 'F0' && (
+                                  <input 
+                                    type="number"
+                                    placeholder="alt sınır"
+                                    title="Kesme Notu Alt Sınırı"
+                                    value={currentPending.gradeThresholds?.[grade as keyof typeof currentPending.gradeThresholds] ?? ''}
+                                    onChange={(e) => {
+                                      const val = parseInt(e.target.value) || 0;
+                                      setPendings(prev => prev.map(p => {
+                                        if (p.id === currentPending.id) {
+                                          return {
+                                            ...p,
+                                            gradeThresholds: {
+                                              ...(p.gradeThresholds || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0}),
+                                              [grade]: val
+                                            }
+                                          };
+                                        }
+                                        return p;
+                                      }));
+                                    }}
+                                    className="w-full text-center text-xs font-bold bg-white border border-gray-200 rounded p-[2px] mb-1 text-primary outline-none focus:border-secondary transition-colors"
+                                  />
+                                )}
+                                <input 
+                                  type="number"
+                                  title="Öğrenci Sayısı"
+                                  placeholder="sayı"
+                                  value={(grade === 'F0' && (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing')) ? 0 : (currentPending.gradesDistribution?.[grade as keyof typeof currentPending.gradesDistribution] ?? 0)} disabled={grade === 'F0' && (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing')}
+                                  onChange={(e) => {
+                                    const val = parseInt(e.target.value) || 0;
+                                    setPendings(prev => prev.map(p => {
+                                      if (p.id === currentPending.id) {
+                                        return {
+                                          ...p,
+                                          gradesDistribution: {
+                                            ...(p.gradesDistribution || {}),
+                                            [grade]: val
+                                          } as any
+                                        };
+                                      }
+                                      return p;
+                                    }));
+                                  }}
+                                  className="w-full text-center text-xs font-bold leading-none bg-transparent border-none p-0 focus:ring-0 mt-1"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
 
                         <div className="grid grid-cols-2 gap-4">
                           <div className="space-y-1 col-span-2">
@@ -2764,66 +3333,6 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Threshold distribution count fields */}
-                        <div className="pt-2">
-                          <label className="text-[10px] font-bold text-primary uppercase tracking-wider block mb-2">
-                            Çan Notları Alt Sınırları & Harf Sayıları
-                          </label>
-                          <div className="grid grid-cols-5 gap-1.5">
-                            {['AA', 'BA', 'BB', 'CB', 'CC', 'DC', 'DD', 'FD', 'FF', 'F0'].map((grade) => (
-                              <div key={grade} className="bg-gray-50 p-1.5 border border-gray-200 rounded text-center mb-2">
-                                <span className="text-[9px] font-extrabold text-[#3e5e95] block leading-none mb-1">{grade}</span>
-                                {grade !== 'F0' && (
-                                  <input 
-                                    type="number"
-                                    placeholder="alt sınır"
-                                    title="Kesme Notu Alt Sınırı"
-                                    value={currentPending.gradeThresholds?.[grade as keyof typeof currentPending.gradeThresholds] ?? ''}
-                                    onChange={(e) => {
-                                      const val = parseInt(e.target.value) || 0;
-                                      setPendings(prev => prev.map(p => {
-                                        if (p.id === currentPending.id) {
-                                          return {
-                                            ...p,
-                                            gradeThresholds: {
-                                              ...(p.gradeThresholds || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0}),
-                                              [grade]: val
-                                            }
-                                          };
-                                        }
-                                        return p;
-                                      }));
-                                    }}
-                                    className="w-full text-center text-xs font-bold bg-white border border-gray-200 rounded p-[2px] mb-1 text-primary outline-none focus:border-secondary transition-colors"
-                                  />
-                                )}
-                                <input 
-                                  type="number"
-                                  title="Öğrenci Sayısı"
-                                  placeholder="sayı"
-                                  value={(grade === 'F0' && (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing')) ? 0 : (currentPending.gradesDistribution?.[grade as keyof typeof currentPending.gradesDistribution] ?? 0)} disabled={grade === 'F0' && (currentPending.attendanceStatus === 'none' || currentPending.attendanceStatus === 'not_failing')}
-                                  onChange={(e) => {
-                                    const val = parseInt(e.target.value) || 0;
-                                    setPendings(prev => prev.map(p => {
-                                      if (p.id === currentPending.id) {
-                                        return {
-                                          ...p,
-                                          gradesDistribution: {
-                                            ...(p.gradesDistribution || {}),
-                                            [grade]: val
-                                          } as any
-                                        };
-                                      }
-                                      return p;
-                                    }));
-                                  }}
-                                  className="w-full text-center text-xs font-bold leading-none bg-transparent border-none p-0 focus:ring-0 mt-1"
-                                />
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
                         {/* Attendance criteria selector for AI */}
                         <div className="space-y-1 mb-4">
                           <label className="text-[10px] font-bold text-text-muted uppercase">Hocanın Yoklama Durumu</label>
@@ -2841,6 +3350,19 @@ export default function App() {
                             <option value="bonus">Yoklamadan ek puan veriyor</option>
                             <option value="quiz">Quiz yapıyor</option>
                           </select>
+                        </div>
+                        
+                        <div className="space-y-1 mb-4 mt-4">
+                          <label className="text-[10px] font-bold text-text-muted uppercase">Çan Hakkında Açıklama</label>
+                          <textarea 
+                            className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none resize-y min-h-[60px]" 
+                            placeholder="Öğrencinin girdiği not/açıklama"
+                            value={currentPending.description || ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setPendings(prev => prev.map(p => p.id === currentPending.id ? { ...p, description: val } : p));
+                            }}
+                          />
                         </div>
 
                         {/* Calculated indicators output box (Dynamic on-screen reactive) */}
@@ -3356,7 +3878,7 @@ export default function App() {
                     const uName = currentUser ? (currentUser.displayName || 'İsimsiz Kullanıcı') : '';
                     
                     const userApproved = courses
-                      .filter(c => c.uploadedBy && c.uploadedBy.toLowerCase() === uName.toLowerCase())
+                    .filter(c => c.uploadedBy && c.uploadedBy.toLowerCase() === uName.toLowerCase())
                       .map(c => ({ title: c.title, code: c.code, prof: c.professorName, date: c.uploadedDate || '', status: 'approved' }));
                       
                     const userPendings = pendings
@@ -3399,6 +3921,151 @@ export default function App() {
                   })()}
                 </div>
               </div>
+
+              {/* Bug/Request Reporting Form (Right 4 cols) */}
+              <div className="md:col-span-4 bg-white border border-gray-200 rounded-2xl p-6 shadow-sm space-y-4">
+                <div>
+                  <h3 className="font-display font-extrabold text-primary text-base pb-2 border-b border-gray-100 flex items-center gap-2">
+                    <AlertTriangle className="text-amber-500" size={18} />
+                    Destek ve Hata Bildirimi
+                  </h3>
+                  <p className="text-xs text-text-muted mt-2">
+                    Portal ile ilgili hata bildirebilir veya yeni bir özellik / istek iletebilirsiniz.
+                  </p>
+
+                  <form onSubmit={handleSubmitReport} className="mt-4 space-y-3">
+                    {/* Type selection button */}
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-bold text-text-muted uppercase">Bildirim Türü</label>
+                      <div className="grid grid-cols-2 gap-2 mt-1">
+                        <button
+                          type="button"
+                          onClick={() => setReportType('bug')}
+                          className={`py-2 px-1.5 rounded-lg text-[11px] font-bold border transition-all ${
+                            reportType === 'bug'
+                              ? 'bg-rose-50 border-rose-300 text-rose-700'
+                              : 'bg-white border-gray-200 text-primary hover:bg-gray-50'
+                          }`}
+                        >
+                          Hata / Bug
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setReportType('request')}
+                          className={`py-2 px-1.5 rounded-lg text-[11px] font-bold border transition-all ${
+                            reportType === 'request'
+                              ? 'bg-amber-50 border-amber-300 text-amber-700'
+                              : 'bg-white border-gray-200 text-primary hover:bg-gray-50'
+                          }`}
+                        >
+                          Öneri / İstek
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Title */}
+                    <div className="space-y-1 flex flex-col">
+                      <label className="text-[10px] font-bold text-text-muted uppercase">Başlık</label>
+                      <input
+                        type="text"
+                        value={reportTitle}
+                        onChange={(e) => setReportTitle(e.target.value)}
+                        placeholder="Örn: Buton çalışmıyor"
+                        className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-primary transition-all outline-none"
+                        required
+                      />
+                    </div>
+
+                    {/* Description */}
+                    <div className="space-y-1 flex flex-col">
+                      <label className="text-[10px] font-bold text-text-muted uppercase">Detaylar</label>
+                      <textarea
+                        rows={3}
+                        value={reportDescription}
+                        onChange={(e) => setReportDescription(e.target.value)}
+                        placeholder="Yaşadığınız sorunu veya isteğinizi buraya detaylandırın..."
+                        className="bg-white border border-gray-200 rounded-xl px-3 py-2 text-xs focus:ring-1 focus:ring-primary focus:border-primary transition-all outline-none resize-none"
+                        required
+                      />
+                    </div>
+
+                    {/* CTA button */}
+                    <button
+                      type="submit"
+                      disabled={submittingReport}
+                      className="w-full bg-primary hover:bg-primary-dark text-white py-2.5 px-4 rounded-xl text-xs font-bold transition-all border border-transparent shadow hover:shadow-md disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Plus size={14} />
+                      {submittingReport ? 'Gönderiliyor...' : 'Raporu Gönder'}
+                    </button>
+                  </form>
+                </div>
+              </div>
+
+              {/* My Reports list */}
+              <div className="md:col-span-12 bg-white border border-gray-200 rounded-2xl p-6 shadow-sm space-y-4">
+                <div className="flex justify-between items-center pb-2 border-b border-gray-100">
+                  <h3 className="font-display font-extrabold text-primary text-base flex items-center gap-2">
+                    <History size={18} className="text-secondary" />
+                    Gönderdiğim Hata & İstek Raporları
+                  </h3>
+                  <span className="text-xs bg-gray-100 px-3 py-1 rounded-full font-bold text-primary">
+                    Toplam: {reports.filter(r => r.userId === currentUser?.uid).length}
+                  </span>
+                </div>
+
+                <div className="flex flex-col gap-4">
+                  {(() => {
+                    const myReports = reports.filter(r => r.userId === currentUser?.uid);
+                    if (myReports.length === 0) {
+                      return (
+                        <div className="text-center py-8 text-text-muted">
+                          <p className="text-sm">Henüz bildirdiğiniz bir hata veya istek bulunmamaktadır.</p>
+                        </div>
+                      );
+                    }
+
+                    return myReports.map((rep) => (
+                      <div key={rep.id} className="p-4 border border-gray-100 rounded-xl bg-gray-50/40 hover:bg-gray-50 transition-colors space-y-2 text-left">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-[9px] font-extrabold uppercase px-2 py-0.5 rounded-full ${
+                              rep.type === 'bug' 
+                                ? 'bg-rose-50 text-rose-700 border border-rose-200' 
+                                : 'bg-amber-50 text-amber-700 border border-amber-200'
+                            }`}>
+                              {rep.type === 'bug' ? 'Hata / Bug' : 'İstek / Öneri'}
+                            </span>
+                            <h4 className="font-bold text-primary text-sm">{rep.title}</h4>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-text-muted font-bold">{rep.date}</span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border ${
+                              rep.status === 'resolved'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : rep.status === 'dismissed'
+                                ? 'bg-gray-100 text-gray-600 border-gray-200'
+                                : 'bg-primary/5 text-primary border-primary/20'
+                            }`}>
+                              {rep.status === 'resolved' ? 'Çözüldü' : rep.status === 'dismissed' ? 'Kapatıldı' : 'İnceleme Bekliyor'}
+                            </span>
+                          </div>
+                        </div>
+                        <p className="text-xs text-gray-700 leading-relaxed whitespace-pre-line">{rep.description}</p>
+                        {rep.adminNote && (
+                          <div className="mt-2 p-3 bg-white border border-gray-200 rounded-xl text-xs space-y-1">
+                            <span className="font-extrabold text-primary flex items-center gap-1">
+                              💡 Yönetici Notu:
+                            </span>
+                            <p className="text-gray-700 leading-relaxed">{rep.adminNote}</p>
+                          </div>
+                        )}
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+
               {/* Profile setup configuration elements */}
               <div className="md:col-span-12 bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
                 <h3 className="font-display font-extrabold text-primary text-base pb-3 border-b border-gray-100">Hesap Ayarları</h3>
