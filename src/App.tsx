@@ -26,6 +26,7 @@ import {
   X,
   Plus,
   HelpCircle,
+  Trash2,
 } from 'lucide-react';
 import { auth, db } from './firebase';
 import { collection, doc, setDoc, getDocs, getDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
@@ -721,6 +722,7 @@ export default function App() {
       gradesDistribution: activeAdminForm.gradesDistribution,
       description: activeAdminForm.description,
       mappings: activeAdminForm.mappings,
+      comments: activeAdminForm.comments || [],
       department: firstMapping.dept,
       year: firstMapping.year,
       
@@ -844,6 +846,7 @@ export default function App() {
     return uniqueCodes.map(code => {
       const instances = filteredCourses.filter(c => c.code === code);
       const avgBell = instances.length > 0 ? instances.reduce((sum, c) => sum + (c.averageBell || 0), 0) / instances.length : 0;
+      const avgStdDev = instances.length > 0 ? instances.reduce((sum, c) => sum + (c.stdDev || 0), 0) / instances.length : 0;
       
       const totalPassed = instances.reduce((sum, c) => {
         const gd = c.gradesDistribution || {AA:0,BA:0,BB:0,CB:0,CC:0,DC:0,DD:0,FD:0,FF:0,F0:0};
@@ -863,6 +866,7 @@ export default function App() {
         professorCount: Array.from(new Set(instances.map(c => c.professorName))).length,
         totalStudents,
         averageBell: avgBell.toFixed(1),
+        stdDev: avgStdDev.toFixed(1),
         passingRate: passingRateFormatted
       };
     });
@@ -1700,6 +1704,11 @@ export default function App() {
                             <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Kayıtlı Öğrenci</span>
                             <span className="text-lg font-extrabold text-primary">{course.totalStudents}</span>
                           </div>
+                          <div className="h-8 w-[1px] bg-gray-200"></div>
+                          <div className="flex flex-col">
+                            <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Std. Sapma</span>
+                            <span className="text-lg font-extrabold text-primary">{course.stdDev}</span>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -1768,23 +1777,37 @@ export default function App() {
                   }, 0);
                   const totalStudents = profInstances.reduce((sum, c) => sum + c.totalStudents, 0);
                   const passingRate = totalStudents > 0 ? (totalPassed / totalStudents) * 100 : 0;
-                  
-                  
+                  const avgStdDev = profInstances.reduce((sum, c) => sum + (c.stdDev || 0), 0) / profInstances.length;
 
                   return (
                     <div 
                       key={prof}
                       onClick={() => { setSelectedProfessorName(prof); setActiveScreen('course_professor_terms'); }}
-                      className="group bg-white rounded-xl p-6 border border-gray-200/60 hover:border-primary hover:shadow-md transition-all cursor-pointer relative"
+                      className="group bg-white rounded-xl p-6 border border-gray-200/60 hover:border-primary hover:shadow-md transition-all cursor-pointer relative flex flex-col justify-between"
                     >
-                      <div className="flex justify-between items-start mb-4">
-                        <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
-                          <User size={24} />
+                      <div className="space-y-4">
+                        <div className="flex justify-between items-start mb-4">
+                          <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
+                            <User size={24} />
+                          </div>
                         </div>
-                        
+                        <div>
+                          <h4 className="font-extrabold text-lg text-primary">{prof}</h4>
+                          <p className="text-xs text-text-muted mt-2">Dönem Sayısı: {profInstances.length}</p>
+                        </div>
                       </div>
-                      <h4 className="font-extrabold text-lg text-primary">{prof}</h4>
-                      <p className="text-xs text-text-muted mt-2">Dönem Sayısı: {profInstances.length}</p>
+                      
+                      <div className="flex items-center gap-4 mt-6 pt-4 border-t border-gray-100">
+                        <div className="flex flex-col">
+                          <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Geçme Oranı</span>
+                          <span className="text-lg font-extrabold text-primary">%{(passingRate || 0).toFixed(1)}</span>
+                        </div>
+                        <div className="h-8 w-[1px] bg-gray-200"></div>
+                        <div className="flex flex-col">
+                          <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Std. Sapma</span>
+                          <span className="text-lg font-extrabold text-primary">{(avgStdDev || 0).toFixed(1)}</span>
+                        </div>
+                      </div>
                     </div>
                   );
                 });
@@ -1821,22 +1844,36 @@ export default function App() {
                   <div 
                     key={termInstance.id}
                     onClick={() => { setSelectedCourseId(termInstance.id); setActiveScreen('detail'); }}
-                    className="group bg-white rounded-xl p-6 border border-gray-200/60 hover:border-primary hover:shadow-md transition-all cursor-pointer relative"
+                    className="group bg-white rounded-xl p-6 border border-gray-200/60 hover:border-primary hover:shadow-md transition-all cursor-pointer relative flex flex-col justify-between"
                   >
-                    <div className="flex justify-between items-start mb-4">
-                      <div className="flex flex-col">
-                        <span className="text-xs text-text-muted mb-1 text-left uppercase tracking-wider">Dönem & Dil</span>
-                        <h4 className="font-extrabold text-lg text-primary">{termInstance.term}</h4>
-                        {termInstance.language && (
-                          <span className="text-xs text-secondary mt-1 font-bold">{termInstance.language}</span>
-                        )}
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-start mb-4">
+                        <div className="flex flex-col">
+                          <span className="text-xs text-text-muted mb-1 text-left uppercase tracking-wider">Dönem & Dil</span>
+                          <h4 className="font-extrabold text-lg text-primary">{termInstance.term}</h4>
+                          {termInstance.language && (
+                            <span className="text-xs text-secondary mt-1 font-bold">{termInstance.language}</span>
+                          )}
+                        </div>
+                        <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
+                          tag === 'Zorlayıcı Çan' ? 'bg-rose-500/10 text-rose-700' : 
+                          tag === 'Öğrenci Dostu Çan' ? 'bg-emerald-500/10 text-emerald-700' : 'bg-amber-500/10 text-amber-700'
+                        }`}>
+                          {tag}
+                        </span>
                       </div>
-                      <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${
-                        tag === 'Zorlayıcı Çan' ? 'bg-rose-500/10 text-rose-700' : 
-                        tag === 'Öğrenci Dostu Çan' ? 'bg-emerald-500/10 text-emerald-700' : 'bg-amber-500/10 text-amber-700'
-                      }`}>
-                        {tag}
-                      </span>
+                    </div>
+                    
+                    <div className="flex items-center gap-4 mt-6 pt-4 border-t border-gray-100">
+                      <div className="flex flex-col">
+                        <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Geçme Oranı</span>
+                        <span className="text-lg font-extrabold text-primary">%{(termInstance.passingRate || 0).toFixed(1)}</span>
+                      </div>
+                      <div className="h-8 w-[1px] bg-gray-200"></div>
+                      <div className="flex flex-col">
+                        <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Std. Sapma</span>
+                        <span className="text-lg font-extrabold text-primary">{(termInstance.stdDev || 0).toFixed(1)}</span>
+                      </div>
                     </div>
                   </div>
                 );
@@ -2456,9 +2493,10 @@ export default function App() {
                                 bellType: c.bellType || 'mutlak',
                                 attendanceStatus: c.attendanceStatus || 'none',
                                 gradeThresholds: c.gradeThresholds || {AA:85, BA:75, BB:65, CB:55, CC:45, DC:40, DD:30, FD:20, FF:0},
-                                gradesDistribution: c.gradesDistribution || {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0,  FD:0, FF:0, F0:0},
+                                gradesDistribution: c.gradesDistribution || {AA:0, BA:0, BB:0, CB:0, CC:0, DC:0, DD:0, FD:0, FF:0, F0:0},
                                 description: c.description || '',
-                                mappings: c.mappings || []
+                                mappings: c.mappings || [],
+                                comments: c.comments || []
                               });
                             }}
                             className={`group p-4 bg-white rounded-xl shadow-sm cursor-pointer transition-all hover:shadow-md border-2 text-left space-y-2 ${
@@ -3815,6 +3853,48 @@ export default function App() {
                           className="w-full bg-white text-primary border border-gray-200 focus:border-primary px-3 py-2 text-xs rounded-lg outline-none resize-none"
                         ></textarea>
                       </div>
+                      
+                      {/* Approved Comments Management */}
+                      <div className="pt-4 col-span-2">
+                        <label className="text-[10px] font-bold text-primary uppercase tracking-wider block mb-2">
+                          Onaylı Yorum Yönetimi ({activeAdminForm.comments?.length || 0})
+                        </label>
+                        <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                          {activeAdminForm.comments && activeAdminForm.comments.length > 0 ? (
+                            activeAdminForm.comments.map((comment: any, idx: number) => (
+                              <div key={comment.id || idx} className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex justify-between items-start gap-4">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-bold text-primary">{comment.authorName}</span>
+                                    <span className="text-[9px] text-text-muted">{comment.date}</span>
+                                  </div>
+                                  <p className="text-xs text-gray-700">{comment.text}</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if(window.confirm('Bu yorumu silmek istediğinize emin misiniz? (Değişiklikleri kaydetmek için Güncelle butonuna tıklamalısınız)')) {
+                                      setActiveAdminForm((prev: any) => ({
+                                        ...prev,
+                                        comments: prev.comments.filter((c: any) => c.id !== comment.id)
+                                      }));
+                                    }
+                                  }}
+                                  className="text-rose-500 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 p-1.5 rounded-lg transition-colors border border-rose-100"
+                                  title="Yorumu Sil"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-center p-4 bg-gray-50 rounded-lg border border-gray-100 text-[11px] text-text-muted">
+                              Bu derse ait onaylanmış yorum bulunmuyor.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
                     </div>
                   </div>
                 )}
