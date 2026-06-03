@@ -175,21 +175,27 @@ export default function App() {
               setAuthInitializing(false);
               return;
             }
-            const userRole = (user.email === 'Muhammedensarozketen@gmail.com' || data.role === 'admin') ? 'admin' : 'student';
-            setAuthRole(userRole);
+            if (!data.name || data.name === "İsimsiz") {
+              setAuthRole('guest');
+              setPendingGUser(user);
+            } else {
+              const userRole = (user.email === 'Muhammedensarozketen@gmail.com' || data.role === 'admin') ? 'admin' : 'student';
+              setAuthRole(userRole);
+            }
           } else {
-            setAuthRole('student');
+            setAuthRole('guest');
+            setPendingGUser(user);
           }
         } catch (e) {
           setAuthRole('student');
         }
-      } else if (authRole === 'student') {
-        setAuthRole('guest');
+      } else {
+        setAuthRole(prev => (prev === 'student' ? 'guest' : prev));
       }
       setAuthInitializing(false);
     });
     return () => unsubscribe();
-  }, [authRole]);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('ytu_iibf_auth', authRole);
@@ -362,36 +368,75 @@ export default function App() {
     }
   }, [activeAccount]);
 
-   const [systemAccounts, setSystemAccounts] = useState<any[]>([]);
+  const [systemAccounts, setSystemAccounts] = useState<any[]>([]);
 
-  const leaderboardRanking = useMemo(() => {
-    // Collect stats from courses mapping to uploadedBy (or usernames in systemAccounts)
-    // Actually not just systemAccounts, any user in systemAccounts counts.
-    const stats = systemAccounts.map(acc => {
-      const uploads = courses.filter(c => c.uploadedBy === acc.name || c.uploadedBy === acc.googleName).length;
-      return { ...acc, uploads };
-    });
+  const activeAppUsername = useMemo(() => {
+    if (!currentUser) return 'İsimsiz Kullanıcı';
+    const dbUser = systemAccounts.find(u => u.id === currentUser.uid);
+    return dbUser?.name || currentUser.displayName || 'İsimsiz Kullanıcı';
+  }, [currentUser, systemAccounts]);
+
+  const allAccountsAndStats = useMemo(() => {
+    const statsMap = new Map<string, any>();
     
-    // Also consider users who might have uploaded but are not in systemAccounts ?
-    // No, the task says "kullanıcıların hesabına", so system accounts.
-    return stats.filter(s => s.uploads > 0).sort((a,b) => b.uploads - a.uploads);
+    systemAccounts.forEach(acc => {
+      statsMap.set(acc.name, { ...acc, uploads: 0 });
+    });
+
+    courses.forEach(c => {
+      if (c.uploadedBy) {
+        let found = false;
+        systemAccounts.forEach(acc => {
+          if (c.uploadedBy === acc.name || c.uploadedBy === acc.googleName) {
+            statsMap.get(acc.name).uploads += 1;
+            found = true;
+          }
+        });
+        
+        if (!found) {
+          if (statsMap.has(c.uploadedBy)) {
+            statsMap.get(c.uploadedBy).uploads += 1;
+          } else {
+            statsMap.set(c.uploadedBy, {
+              id: 'legacy_' + c.uploadedBy,
+              name: c.uploadedBy,
+              googleName: c.uploadedBy,
+              email: 'Sistemde Bulunmayan Hesap',
+              role: 'student',
+              joinDate: 'Eski / Manuel Kayıt',
+              uploads: 1
+            });
+          }
+        }
+      }
+    });
+
+    return Array.from(statsMap.values()).sort((a,b) => b.uploads - a.uploads);
   }, [systemAccounts, courses]);
 
+  const leaderboardRanking = useMemo(() => {
+    return allAccountsAndStats.filter(s => s.uploads > 0);
+  }, [allAccountsAndStats]);
+
   useEffect(() => {
-    if (authRole === 'admin') {
-       const fetchAccounts = async () => {
-         try {
-           const snap = await getDocs(collection(db, "users"));
-           const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-           setSystemAccounts(users);
-         } catch(err) {
-           console.error("Failed to fetch users", err);
-           setSystemAccounts([]);
-         }
-       };
-       fetchAccounts();
-    }
-  }, [authRole]);
+    const unsubscribe = onSnapshot(collection(db, "users"), async (snap) => {
+      const dbUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      // Clean up mock accounts quickly just in case they persist
+      const testIds = ['1', '2', '3', '4'];
+      dbUsers.forEach(u => {
+        if (testIds.includes(u.id)) {
+          deleteDoc(doc(db, "users", u.id)).catch(()=> {});
+        }
+      });
+      
+      setSystemAccounts(dbUsers.filter(u => !testIds.includes(u.id)));
+    }, (err) => {
+      console.error("Failed to fetch users", err);
+      setSystemAccounts([]);
+    });
+    return () => unsubscribe();
+  }, []);
   const [adminDirectForm, setAdminDirectForm] = useState({
     courseTitle: '',
     professorName: '',
@@ -470,7 +515,7 @@ export default function App() {
       attendanceStatus: uploadForm.attendanceStatus || 'none',
       description: uploadForm.description || '',
       date: new Date().toLocaleDateString('tr-TR'),
-      applicantName: currentUser ? currentUser.displayName || 'İsimsiz Kullanıcı' : 'İsimsiz Kullanıcı',
+      applicantName: activeAppUsername,
       applicantId: '21043' + Math.floor(Math.random() * 800 + 100),
       fileUrl: uploadForm.fileUploaded ? uploadForm.fileData : ''
     };
@@ -2626,11 +2671,11 @@ export default function App() {
                          Sistemdeki Hesaplar
                        </h3>
                        <span className="bg-primary text-white text-[10px] font-extrabold px-3 py-1 rounded-full">
-                         {systemAccounts.length} Hesap
+                         {allAccountsAndStats.length} Hesap
                        </span>
                     </div>
                     <div className="space-y-3 max-h-[calc(100vh-250px)] overflow-y-auto pr-1">
-                      {systemAccounts.map(acc => (
+                      {allAccountsAndStats.map(acc => (
                         <div
                           key={acc.id}
                           onClick={() => setActiveAccount(acc)}
@@ -3955,7 +4000,7 @@ export default function App() {
 
                 <div className="flex flex-col gap-3">
                   {(() => {
-                    const uName = currentUser ? (currentUser.displayName || 'İsimsiz Kullanıcı') : '';
+                    const uName = activeAppUsername;
                     
                     const userApproved = courses
                     .filter(c => c.uploadedBy && c.uploadedBy.toLowerCase() === uName.toLowerCase())
